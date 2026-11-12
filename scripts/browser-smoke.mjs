@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
+import { launchChrome } from './chrome-launch.mjs'
+import { dismissKnownOnboarding } from './browser-ui.mjs'
 
 /** Exercise the installed client in an isolated Chrome profile, when available. */
 export async function verifyBrowser(launchUrl, temp, serverMode = false) {
@@ -16,24 +17,30 @@ export async function verifyBrowser(launchUrl, temp, serverMode = false) {
     console.log('Chrome unavailable; browser smoke check skipped.')
     return
   }
-  const profile = join(temp, 'chrome')
-  const chrome = spawn(chromePath, [
-    '--headless=new', '--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--no-proxy-server',
-    '--no-first-run', '--no-default-browser-check', '--remote-debugging-port=0',
-    `--user-data-dir=${profile}`, 'about:blank',
-  ], { stdio: 'ignore' })
+  const chrome = await launchChrome(chromePath, temp)
   let socket
   try {
-    let port
-    for (let i = 0; i < 150; i++) {
-      try { port = Number(readFileSync(join(profile, 'DevToolsActivePort'), 'utf8').split('\n')[0]) } catch {}
-      if (port) break
-      await delay(100)
-    }
-    assert.ok(port, 'Chrome debugging endpoint did not start')
-    const target = await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: 'PUT' })).json()
+    const response = await fetch(`http://127.0.0.1:${chrome.port}/json/new?about:blank`, { method: 'PUT', signal: AbortSignal.timeout(15000) })
+    if (!response.ok) throw new Error(`Chrome could not create a test tab: HTTP ${response.status}`)
+    const target = await response.json()
     socket = new WebSocket(target.webSocketDebuggerUrl)
-    await new Promise((resolve, reject) => { socket.addEventListener('open', resolve, { once: true }); socket.addEventListener('error', reject, { once: true }) })
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => finish(new Error('Chrome debugging connection timed out')), 15000)
+      const finish = (error) => {
+        clearTimeout(timer)
+        socket.removeEventListener('open', opened)
+        socket.removeEventListener('error', failed)
+        socket.removeEventListener('close', closed)
+        if (error) reject(error)
+        else resolve()
+      }
+      const opened = () => finish()
+      const failed = () => finish(new Error('Chrome debugging connection failed'))
+      const closed = () => finish(new Error('Chrome debugging connection closed before opening'))
+      socket.addEventListener('open', opened, { once: true })
+      socket.addEventListener('error', failed, { once: true })
+      socket.addEventListener('close', closed, { once: true })
+    })
     const pending = new Map()
     let id = 0
     socket.addEventListener('message', (event) => {
@@ -110,60 +117,41 @@ export async function verifyBrowser(launchUrl, temp, serverMode = false) {
       }
       assert.ok(detail, 'issue details did not render')
       await evaluate(`document.querySelector('.dab-detail button')?.click()`)
-      await evaluate(`(() => {
-        const dialog = [...document.querySelectorAll('[role=dialog]')].find((node) => /\u9884\u89c8\u7248\u8bf4\u660e|Preview Notice/i.test(node.innerText || ''));
-        const button = dialog && [...dialog.querySelectorAll('button')].find((node) => /^(\u7ee7\u7eed|Continue)$/i.test((node.textContent || '').trim()));
-        if (button) button.click();
-      })()`)
       for (let i = 0; i < 50; i++) {
-        if (!(await evaluate(`Array.from(document.querySelectorAll('[role=dialog]')).some((node) => /\u9884\u89c8\u7248\u8bf4\u660e|Preview Notice/i.test(node.innerText || ''))`))) break
-        await delay(100)
-      }
-      await evaluate(`(() => {
-        const dialog = [...document.querySelectorAll('[role=dialog]')].find((node) => /\u5f00\u59cb\u4f7f\u7528|Get started/i.test(node.innerText || ''));
-        const button = dialog && [...dialog.querySelectorAll('button')].find((node) => /^(\u5173\u95ed|Close)$/i.test(node.getAttribute('aria-label') || '') || !(node.textContent || '').trim());
-        if (button) button.click();
-      })()`)
-      for (let i = 0; i < 50; i++) {
-        if (!(await evaluate(`Array.from(document.querySelectorAll('[role=dialog]')).some((node) => /\u5f00\u59cb\u4f7f\u7528|Get started/i.test(node.innerText || ''))`))) break
+        if (await evaluate(`(${dismissKnownOnboarding.toString()})()`) === 'none') break
         await delay(100)
       }
       await capture('jira-board-ready')
-      await evaluate(`(() => {
-        const account = [...document.querySelectorAll('button')].find((node) => /\u8d26\u53f7\u83dc\u5355|Account menu/i.test(node.getAttribute('aria-label') || ''));
-        if (account && account.getBoundingClientRect().x < 0) {
-          const toggle = [...document.querySelectorAll('button')].find((node) => /\u6253\u5f00\u4fa7\u8fb9\u680f|Open sidebar/i.test(node.getAttribute('aria-label') || '') && node.getBoundingClientRect().x >= 0);
-          if (toggle) toggle.click();
-        }
-      })()`)
-      for (let i = 0; i < 50; i++) {
-        if (await evaluate(`(([...document.querySelectorAll('button')].find((node) => /\u8d26\u53f7\u83dc\u5355|Account menu/i.test(node.getAttribute('aria-label') || '')))?.getBoundingClientRect().x ?? -1) >= 0`)) break
-        await delay(100)
-      }
-      const menuPosition = await evaluate(`(() => {
-        const hit = [...document.querySelectorAll('button,[role=button]')].find((node) => /\u8d26\u53f7\u83dc\u5355|account menu/i.test(node.getAttribute('aria-label') || ''));
-        if (!hit) return null;
-        const r = hit.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
-      })()`)
-      if (menuPosition) {
-        for (let i = 0; i < 5; i++) {
-          await send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...menuPosition })
-          await send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...menuPosition })
-          await delay(200)
-          if (await evaluate(`([...document.querySelectorAll('button')].find((node) => /\u8d26\u53f7\u83dc\u5355|Account menu/i.test(node.getAttribute('aria-label') || '')))?.getAttribute('aria-expanded') === 'true'`)) break
-        }
-      }
       let opened = false
-      for (let i = 0; i < 100; i++) {
-        opened = await evaluate(`(() => {
-          const hit = [...document.querySelectorAll('button,[role=button],a,[role=menuitem]')].find((node) => {
+      for (let i = 0; i < 200; i++) {
+        const action = await evaluate(`(() => {
+          const onboarding = (${dismissKnownOnboarding.toString()})();
+          if (onboarding !== 'none') return { kind: onboarding };
+          const visible = (node) => {
+            const r = node.getBoundingClientRect();
+            return r.width > 0 && r.height > 0 && r.right > 0 && r.bottom > 0 && r.left < innerWidth && r.top < innerHeight;
+          };
+          const settings = [...document.querySelectorAll('button,[role=button],a,[role=menuitem]')].find((node) => {
             const label = (node.getAttribute('aria-label') || node.textContent || '').trim();
-            return label.startsWith('\u8bbe\u7f6e') || label.startsWith('Settings') || label.includes('\u6253\u5f00\u8bbe\u7f6e');
+            return visible(node) && (label.startsWith('\u8bbe\u7f6e') || label.startsWith('Settings') || label.includes('\u6253\u5f00\u8bbe\u7f6e'));
           });
-          if (!hit) return false; hit.click(); return true;
+          if (settings) { settings.click(); return { kind: 'opened' }; }
+          const account = [...document.querySelectorAll('button')].find((node) => /\u8d26\u53f7\u83dc\u5355|Account menu/i.test(node.getAttribute('aria-label') || ''));
+          if (!account || !visible(account)) {
+            const toggle = [...document.querySelectorAll('button')].find((node) => /\u6253\u5f00\u4fa7\u8fb9\u680f|Open sidebar/i.test(node.getAttribute('aria-label') || '') && visible(node));
+            if (toggle) toggle.click();
+            return { kind: 'waiting' };
+          }
+          if (account.getAttribute('aria-expanded') === 'true') return { kind: 'waiting' };
+          const r = account.getBoundingClientRect();
+          return { kind: 'account', x: r.x + r.width / 2, y: r.y + r.height / 2 };
         })()`)
-        if (opened) break
-        await delay(100)
+        if (action.kind === 'opened') { opened = true; break }
+        if (action.kind === 'account') {
+          await send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, x: action.x, y: action.y })
+          await send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, x: action.x, y: action.y })
+        }
+        await delay(action.kind === 'account' ? 300 : 100)
       }
       if (!opened) {
         const details = await evaluate(`(() => {
@@ -242,7 +230,6 @@ export async function verifyBrowser(launchUrl, temp, serverMode = false) {
     }
   } finally {
     socket?.close()
-    chrome.kill('SIGTERM')
-    await delay(250)
+    await chrome.close()
   }
 }
