@@ -1,0 +1,9 @@
+- insert:
+    - id: atlassian
+      name: '@lornatang/dsh-atlassian-bridge'
+      config:
+        mode: cloud
+        serverName: atlassian
+        url: 'https://mcp.atlassian.com/v1/mcp'
+        redirectPort: 3334
+        autoOpenBrowser: true
