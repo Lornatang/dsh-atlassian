@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.6
+
+- Allow any DSH version in the package metadata and run integration checks against the selected host.
+
 ## 0.1.5
 
 - Rename the package to `@lornatang/dsh-atlassian`, retaining existing profile

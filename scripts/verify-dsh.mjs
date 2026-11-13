@@ -26,7 +26,7 @@ let output = ''
 try {
   await mkdir(home, { recursive: true })
   const version = (await run(dsh, ['--version'], { env, timeout: 30000 })).stdout.trim()
-  assert.equal(version, '0.2.2-rc.2', 'this integration test targets DSH 0.2.2-rc.2')
+  assert.ok(version, 'DSH did not report its version')
   await run(dsh, ['--profile', 'bridge-test', '--from-default-profile', 'web', '--dump-config'], { env, cwd: temp, timeout: 60000, maxBuffer: 1024 * 1024 })
   const profile = join(dshHome, 'profiles', 'bridge-test')
   const expected = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
@@ -147,7 +147,7 @@ try {
     assert.match(await readFile(join(profile, 'cordis.patch.yml'), 'utf8'), /https:\/\/mcp\.atlassian\.com\/v1\/mcp/)
     console.log('DSH: clearing both service URLs selected the official Cloud endpoint.')
   }
-  console.log(`DSH 0.2.2-rc.2: package installation, startup, request fence, ${serverMode ? 'Server REST' : 'MCP'} tools and mock Jira board passed.`)
+  console.log(`DSH ${version}: package installation, startup, request fence, ${serverMode ? 'Server REST' : 'MCP'} tools and mock Jira board passed.`)
 } catch (error) {
   // Do not print the launch URL, cookies, credentials, or configuration.
   const diagnostics = output.split('\n').filter((line) => /atlassian|warning|error/i.test(line) && !/token|https?:\/\//i.test(line)).slice(-20)

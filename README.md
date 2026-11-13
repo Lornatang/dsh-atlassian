@@ -4,7 +4,7 @@ Connect Atlassian Cloud or self-hosted Jira and Confluence to DeepSeek Harness
 (DSH). The plugin exposes Atlassian tools to agent sessions and adds a Jira
 board to the Web interface.
 
-**Requires:** Node.js 22.19+, DSH 0.2.2-rc.2+, and a Web-compatible profile.
+**Requires:** Node.js 22.19+ and a DSH Web-compatible profile.
 
 ## Install
 
