@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.4
+
+- Keep the README focused on installation and everyday use, and remove an
+  unavailable release download link.
+
 ## 0.1.3
 
 - Support explicitly trusted self-signed server certificates in DSH Desktop

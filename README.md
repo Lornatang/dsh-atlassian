@@ -5,7 +5,6 @@ Connect Atlassian Cloud or self-hosted Jira and Confluence to DeepSeek Harness
 board to the Web interface.
 
 **Requires:** Node.js 22.19+, DSH 0.2.2-rc.2+, and a Web-compatible profile.
-Installation and startup are tested with DSH 0.2.2-rc.2.
 
 ## Install
 
@@ -16,12 +15,6 @@ dsh plugin --profile web add @lornatang/dsh-atlassian-bridge
 Restart DSH, or start the default Web profile with `dsh web --no-open`. For a
 profile with another name, replace `web` in the install command. Use the same
 command to update the plugin, then restart DSH; profile configuration is kept.
-
-A prebuilt GitHub Release is also available:
-
-```bash
-dsh plugin --profile web add https://github.com/Lornatang/dsh-atlassian-bridge/releases/latest/download/dsh-atlassian-bridge.tgz
-```
 
 Avoid loading another integration that uses the same settings, routes or tool
 names in the same profile. This community plugin is not an Atlassian or
@@ -86,7 +79,7 @@ The default Cloud configuration is:
 `expectedSite` is a warning, not an access restriction. An empty board query
 uses the built-in view. An empty prompt template uses the default handoff text.
 Cloud MCP and discovered OAuth endpoints require HTTPS; plain HTTP is allowed
-only when the configured MCP server is on loopback for local development.
+only when the configured MCP server is on loopback.
 
 ## Self-hosted Jira and Confluence
 
@@ -176,18 +169,5 @@ dsh plugin --profile web remove @lornatang/dsh-atlassian-bridge
 Disconnect first to remove local credentials, then restart DSH after uninstall.
 Otherwise, remove the corresponding `data/atlassian-bridge-*.json` file from
 the stopped profile manually.
-
-## Development
-
-```bash
-npm ci
-npm run typecheck
-npm test
-npm run test:dsh
-```
-
-The DSH integration test uses a temporary Web profile and local mock services.
-It requires DSH 0.2.2-rc.2 and `pnpm` on `PATH`; Chrome is required in CI and
-used locally when available. These tests do not modify a real Atlassian site.
 
 [Apache-2.0](LICENSE)
