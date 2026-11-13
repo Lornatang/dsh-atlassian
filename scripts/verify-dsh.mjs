@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile, spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -28,10 +29,21 @@ try {
   assert.equal(version, '0.2.2-rc.2', 'this integration test targets DSH 0.2.2-rc.2')
   await run(dsh, ['--profile', 'bridge-test', '--from-default-profile', 'web', '--dump-config'], { env, cwd: temp, timeout: 60000, maxBuffer: 1024 * 1024 })
   const profile = join(dshHome, 'profiles', 'bridge-test')
+  const expected = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
   const previous = process.env.DSH_TEST_UPGRADE_FROM
+  const previousName = '@lornatang/dsh-atlassian-bridge'
+  const modeConfig = serverMode
+    ? `    mode: server\n    server:\n      jiraUrl: '${mock.jiraUrl}'\n      confluenceUrl: '${mock.confluenceUrl}'\n      allowInsecureHttp: true\n`
+    : `    url: '${mock.url}'\n    redirectPort: 0\n    autoOpenBrowser: false\n`
+  const patch = `# existing profile settings\n- id: atlassian\n  config:\n    serverName: atlassian-test\n${modeConfig}    board:\n      jql: ''\n      limit: 10\n      timeoutMs: 5000\n      promptTemplate: ''\n`
   if (previous) {
-    await run(dsh, ['plugin', '--profile', 'bridge-test', 'add', previous, '--registry=https://registry.npmjs.org/'], { env, cwd: temp, timeout: 240000, maxBuffer: 1024 * 1024 })
-    await writeFile(join(profile, 'cordis.patch.yml'), "# existing profile settings\n- id: atlassian\n  config:\n    serverName: atlassian-test\n")
+    let oldSpec = previous
+    if (previous === 'legacy-fixture') {
+      const packed = JSON.parse((await run('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', temp, join(root, 'tests', 'fixtures', 'legacy-plugin')], { cwd: root, env, timeout: 30000 })).stdout)[0]
+      oldSpec = join(temp, packed.filename)
+    }
+    await run(dsh, ['plugin', '--profile', 'bridge-test', 'add', oldSpec, '--registry=https://registry.npmjs.org/'], { env, cwd: temp, timeout: 240000, maxBuffer: 1024 * 1024 })
+    await writeFile(join(profile, 'cordis.patch.yml'), patch)
   }
   let packageSpec = process.env.DSH_TEST_PACKAGE
   if (!packageSpec) {
@@ -39,16 +51,22 @@ try {
     packageSpec = join(temp, packed.filename)
   }
   await run(dsh, ['plugin', '--profile', 'bridge-test', 'add', packageSpec, '--registry=https://registry.npmjs.org/'], { env, cwd: temp, timeout: 240000, maxBuffer: 1024 * 1024 })
-  if (previous) assert.match(await readFile(join(profile, 'cordis.patch.yml'), 'utf8'), /# existing profile settings/)
+  if (previous) {
+    await run(dsh, ['plugin', '--profile', 'bridge-test', 'remove', previousName], { env, cwd: temp, timeout: 240000, maxBuffer: 1024 * 1024 })
+    assert.equal(await readFile(join(profile, 'cordis.patch.yml'), 'utf8'), patch, 'migration must preserve profile settings')
+  } else await writeFile(join(profile, 'cordis.patch.yml'), patch)
   const profilePackage = JSON.parse(await readFile(join(profile, 'package.json'), 'utf8'))
-  assert.ok(profilePackage.dependencies['@lornatang/dsh-atlassian-bridge'])
-  const installed = JSON.parse(await readFile(join(profile, 'node_modules', '@lornatang', 'dsh-atlassian-bridge', 'package.json'), 'utf8'))
-  const expected = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
+  assert.ok(profilePackage.dependencies[expected.name])
+  if (previous) assert.ok(!profilePackage.dependencies[previousName], 'migration must remove the previous package')
+  const installed = JSON.parse(await readFile(join(profile, 'node_modules', ...expected.name.split('/'), 'package.json'), 'utf8'))
   assert.equal(installed.version, expected.version, 'the profile must load the version being tested')
-  const modeConfig = serverMode
-    ? `    mode: server\n    server:\n      jiraUrl: '${mock.jiraUrl}'\n      confluenceUrl: '${mock.confluenceUrl}'\n      allowInsecureHttp: true\n`
-    : `    url: '${mock.url}'\n    redirectPort: 0\n    autoOpenBrowser: false\n`
-  await writeFile(join(profile, 'cordis.patch.yml'), `- id: atlassian\n  config:\n    serverName: atlassian-test\n${modeConfig}    board:\n      jql: ''\n      limit: 10\n      timeoutMs: 5000\n      promptTemplate: ''\n`)
+  if (previous && serverMode) {
+    const identity = `server:${mock.jiraUrl}\0${mock.confluenceUrl}`
+    const digest = createHash('sha256').update(identity).digest('hex').slice(0, 12)
+    const dataDir = join(profile, 'data')
+    await mkdir(dataDir, { recursive: true, mode: 0o700 })
+    await writeFile(join(dataDir, `atlassian-bridge-atlassian-test-${digest}.json`), JSON.stringify({ version: 1, serverCredentials: { jira: { username: 'jira-user', secret: 'jira-password' }, confluence: { secret: 'confluence-token' } } }), { mode: 0o600 })
+  }
   server = spawn(dsh, ['--profile', 'bridge-test', '--no-open', '--port', '0'], { env, cwd: temp, stdio: ['ignore', 'pipe', 'pipe'] })
   server.stdout.on('data', (chunk) => { output += chunk })
   server.stderr.on('data', (chunk) => { output += chunk })
@@ -67,7 +85,7 @@ try {
   const entry = await fetch(launch, { redirect: 'manual' })
   const cookie = entry.headers.getSetCookie().map((value) => value.split(';')[0]).join('; ')
   assert.ok(cookie, 'DSH did not issue a login cookie')
-  if (serverMode) {
+  if (serverMode && !previous) {
     const connected = await fetch(origin + '/plugins/atlassian/connect', {
       method: 'POST', headers: { cookie, origin, 'content-type': 'application/json' },
       body: JSON.stringify({ jiraUsername: 'jira-user', jiraSecret: 'jira-password', confluenceSecret: 'confluence-token' }),
@@ -94,8 +112,8 @@ try {
   assert.equal(boardResponse.status, 200)
   const board = await boardResponse.json()
   assert.equal(board.issues[0].key, 'DEMO-1')
-  const bundle = await readFile(join(profile, 'node_modules', '@lornatang', 'dsh-atlassian-bridge', 'lib', 'client.js'), 'utf8')
-  assert.match(bundle, /@lornatang\/dsh-atlassian-bridge/)
+  const bundle = await readFile(join(profile, 'node_modules', ...expected.name.split('/'), 'lib', 'client.js'), 'utf8')
+  assert.ok(bundle.includes(expected.name))
   assert.match(bundle, /jira-board/)
   await verifyBrowser(launch, temp, serverMode)
   if (serverMode) {

@@ -1,6 +1,6 @@
 {
-  "name": "@lornatang/dsh-atlassian-bridge",
-  "version": "0.1.4",
+  "name": "@lornatang/dsh-atlassian",
+  "version": "0.1.5",
   "description": "Connect Atlassian Cloud or self-hosted Jira and Confluence to DeepSeek Harness with tools and a Jira board.",
   "keywords": [
     "deepseek-harness",
@@ -82,11 +82,11 @@
   "author": "Lornatang",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Lornatang/dsh-atlassian-bridge.git"
+    "url": "git+https://github.com/Lornatang/dsh-atlassian.git"
   },
-  "homepage": "https://github.com/Lornatang/dsh-atlassian-bridge#readme",
+  "homepage": "https://github.com/Lornatang/dsh-atlassian#readme",
   "bugs": {
-    "url": "https://github.com/Lornatang/dsh-atlassian-bridge/issues"
+    "url": "https://github.com/Lornatang/dsh-atlassian/issues"
   },
   "publishConfig": {
     "access": "public"

@@ -26,7 +26,7 @@ interface UiWorkspaceApi { connectWorkspace?(id: string): Promise<string> }
 const Context = React.createContext<ClientContext>({ slots: { inject: () => () => undefined, register: () => undefined } })
 if (typeof document !== 'undefined') {
   const style = document.createElement('style')
-  style.setAttribute('data-plugin-css', '@lornatang/dsh-atlassian-bridge')
+  style.setAttribute('data-plugin-css', '@lornatang/dsh-atlassian')
   style.textContent = `
 .dab-root{--dab-line:color-mix(in srgb,currentColor 14%,transparent);--dab-soft:color-mix(in srgb,currentColor 4%,transparent);--dab-softer:color-mix(in srgb,currentColor 2.5%,transparent);box-sizing:border-box;padding:24px 28px 36px;max-width:1120px;margin:0 auto;color:inherit;font-size:14px;line-height:1.5}
 .dab-root *{box-sizing:border-box}.dab-settings{max-width:900px}.dab-root h2,.dab-root h3,.dab-root p{margin:0}.dab-root button,.dab-root input,.dab-root select{font:inherit}
@@ -250,7 +250,7 @@ export function BoardPanelIcon(): React.ReactElement {
   return h('svg', { viewBox: '0 0 24 24', width: 19, height: 19, fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true },
     h('rect', { x: 3, y: 4, width: 18, height: 16, rx: 3 }), h('path', { d: 'M9 4v16M15 4v16M5.8 8h.4M11.8 8h.4M17.8 8h.4' }))
 }
-export const name = '@lornatang/dsh-atlassian-bridge'
+export const name = '@lornatang/dsh-atlassian'
 export const inject = ['slots']
 export function apply(ctx: ClientContext): void {
   const wrap = (component: React.ComponentType<never>): React.ComponentType<never> => {

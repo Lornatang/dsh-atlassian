@@ -1,4 +1,4 @@
-# dsh-atlassian-bridge
+# dsh-atlassian
 
 Connect Atlassian Cloud or self-hosted Jira and Confluence to DeepSeek Harness
 (DSH). The plugin exposes Atlassian tools to agent sessions and adds a Jira
@@ -9,12 +9,23 @@ board to the Web interface.
 ## Install
 
 ```bash
-dsh plugin --profile web add @lornatang/dsh-atlassian-bridge
+dsh plugin --profile web add @lornatang/dsh-atlassian
 ```
 
 Restart DSH, or start the default Web profile with `dsh web --no-open`. For a
 profile with another name, replace `web` in the install command. Use the same
 command to update the plugin, then restart DSH; profile configuration is kept.
+
+To migrate from `@lornatang/dsh-atlassian-bridge`, stop DSH, install the new
+package, remove the old package from the same profile, then restart DSH:
+
+```bash
+dsh plugin --profile web add @lornatang/dsh-atlassian
+dsh plugin --profile web remove @lornatang/dsh-atlassian-bridge
+```
+
+Existing connection settings and stored credentials are retained. Replace
+`web` with the profile you use, such as `desktop` for DSH Desktop.
 
 Avoid loading another integration that uses the same settings, routes or tool
 names in the same profile. This community plugin is not an Atlassian or
@@ -163,7 +174,7 @@ needed.
 ## Uninstall
 
 ```bash
-dsh plugin --profile web remove @lornatang/dsh-atlassian-bridge
+dsh plugin --profile web remove @lornatang/dsh-atlassian
 ```
 
 Disconnect first to remove local credentials, then restart DSH after uninstall.

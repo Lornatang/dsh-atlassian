@@ -9,6 +9,50 @@ import type { SessionStore } from './store.js'
 export interface Logger { info(message: string): void; warn(message: string): void; error(message: string): void }
 export interface AuthorizationCallback { code: string; state: string | undefined }
 
+const MAX_CLOUD_RESPONSE_BYTES = 10 * 1024 * 1024
+
+/** Bound decoded response bytes, including error bodies and individual SSE events. */
+function limitCloudResponse(response: Response, allowEvents: boolean): Response {
+  if (!response.body) return response
+  const events = allowEvents && response.ok && /^text\/event-stream(?:\s*;|$)/i.test(response.headers.get('content-type') ?? '')
+  let size = 0
+  let lineHasContent = false
+  let afterCarriageReturn = false
+  const stream = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      if (!events) {
+        size += chunk.byteLength
+        if (size > MAX_CLOUD_RESPONSE_BYTES) throw new Error('Atlassian Cloud response exceeded the size limit')
+      } else {
+        // SSE events end at an empty line. Track CR, LF and CRLF separately,
+        // including separators split across network chunks.
+        for (const byte of chunk) {
+          size++
+          if (size > MAX_CLOUD_RESPONSE_BYTES) throw new Error('Atlassian Cloud event exceeded the size limit')
+          if (byte === 10 && afterCarriageReturn) { afterCarriageReturn = false; continue }
+          if (byte === 10 || byte === 13) {
+            if (!lineHasContent) size = 0
+            lineHasContent = false
+            afterCarriageReturn = byte === 13
+          } else {
+            lineHasContent = true
+            afterCarriageReturn = false
+          }
+        }
+      }
+      controller.enqueue(chunk)
+    },
+  }))
+  const limited = new Response(stream, { status: response.status, statusText: response.statusText, headers: response.headers })
+  // The SDK uses these properties to resolve and report redirect targets.
+  Object.defineProperties(limited, {
+    url: { value: response.url },
+    redirected: { value: response.redirected },
+    type: { value: response.type },
+  })
+  return limited
+}
+
 function isLoopback(url: URL): boolean {
   return ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
 }
@@ -29,7 +73,9 @@ export function createCloudFetch(serverUrl: URL): { fetch: FetchLike; allowLoopb
       secureUrl(new URL(value), allowLoopbackHttp)
       // The SDK performs its own same-origin redirect handling. Never let fetch
       // follow a redirect before its next target has passed the check above.
-      return await globalThis.fetch(value, { ...init, redirect: init?.redirect === 'error' ? 'error' : 'manual' })
+      const response = await globalThis.fetch(value, { ...init, redirect: init?.redirect === 'error' ? 'error' : 'manual' })
+      const accept = new Headers(init?.headers).get('accept') ?? ''
+      return limitCloudResponse(response, /(?:^|,)\s*text\/event-stream(?:\s*[,;]|\s*$)/i.test(accept))
     },
   }
 }
@@ -117,7 +163,7 @@ export class CallbackServer {
       'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
       'x-content-type-options': 'nosniff',
     })
-    res.end(`<!doctype html><meta charset="utf-8"><title>DSH Atlassian Bridge</title><p>${safe}</p>`)
+    res.end(`<!doctype html><meta charset="utf-8"><title>DSH Atlassian</title><p>${safe}</p>`)
   }
 }
 
@@ -135,7 +181,7 @@ export class AtlassianOAuthProvider implements OAuthClientProvider {
   }
   get redirectUrl(): string { return this.#redirect() }
   get clientMetadata(): OAuthClientMetadata {
-    return { client_name: 'DSH Atlassian Bridge', redirect_uris: [this.redirectUrl], grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], token_endpoint_auth_method: 'none' }
+    return { client_name: 'DSH Atlassian', redirect_uris: [this.redirectUrl], grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], token_endpoint_auth_method: 'none' }
   }
   state(): string { return randomBytes(16).toString('hex') }
   clientInformation(): OAuthClientInformationMixed | undefined { return this.#store.current.clientInformation }

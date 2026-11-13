@@ -1,6 +1,6 @@
 - insert:
     - id: atlassian
-      name: '@lornatang/dsh-atlassian-bridge'
+      name: '@lornatang/dsh-atlassian'
       config:
         mode: cloud
         serverName: atlassian

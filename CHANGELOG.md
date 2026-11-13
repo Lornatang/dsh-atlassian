@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.5
+
+- Rename the package to `@lornatang/dsh-atlassian`, retaining existing profile
+  settings and stored credentials when migrating from the previous package.
+- Limit Cloud response bodies and individual streaming events to prevent
+  excessive memory use from oversized responses.
+
 ## 0.1.4
 
 - Keep the README focused on installation and everyday use, and remove an

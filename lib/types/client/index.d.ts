@@ -9,7 +9,7 @@ interface ClientContext {
 export declare function AtlassianSettings(): React.ReactElement;
 export declare function JiraBoardPanel(): React.ReactElement;
 export declare function BoardPanelIcon(): React.ReactElement;
-export declare const name = "@lornatang/dsh-atlassian-bridge";
+export declare const name = "@lornatang/dsh-atlassian";
 export declare const inject: string[];
 export declare function apply(ctx: ClientContext): void;
 export {};

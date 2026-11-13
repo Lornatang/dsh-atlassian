@@ -4,6 +4,7 @@ import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { gzipSync } from 'node:zlib'
 import { AtlassianOAuthProvider, CallbackServer, createCloudFetch } from '../lib/oauth.js'
 import { JiraBoard } from '../lib/board.js'
 import { registerRoutes } from '../lib/routes.js'
@@ -39,6 +40,46 @@ test('Cloud fetch does not automatically follow redirects', async () => {
     assert.equal(response.status, 307)
     assert.equal(calls, 1)
     await response.body?.cancel()
+  } finally { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)) }
+})
+
+test('Cloud fetch bounds decoded responses and individual SSE events', async () => {
+  const limit = 10 * 1024 * 1024
+  const large = 'x'.repeat(limit + 1)
+  const event = `data: ${'x'.repeat(6 * 1024 * 1024)}\r\n\r\n`
+  const manyEvents = `data: ${'x'.repeat(1024)}\n\n`.repeat(11000)
+  const server = createServer((req, res) => {
+    if (req.url === '/compressed') {
+      res.writeHead(200, { 'content-encoding': 'gzip', 'content-type': 'application/json' }).end(gzipSync(large))
+    } else if (req.url === '/error') {
+      res.writeHead(500, { 'content-type': 'text/event-stream' }).end(manyEvents)
+    } else if (req.url === '/events') {
+      res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' }).end(event + event)
+    } else if (req.url === '/large-event') {
+      res.writeHead(200, { 'content-type': 'text/event-stream' }).end(`data: ${large}\n\n`)
+    } else {
+      res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}')
+    }
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const base = `http://127.0.0.1:${server.address().port}`
+  try {
+    const network = createCloudFetch(new URL(`${base}/mcp`))
+    const normal = await network.fetch(`${base}/ok`)
+    assert.equal(normal.url, `${base}/ok`)
+    assert.deepEqual(await normal.json(), { ok: true })
+    const compressed = await network.fetch(`${base}/compressed`)
+    await assert.rejects(compressed.text(), /response exceeded the size limit/)
+    const error = await network.fetch(`${base}/error`, { headers: { accept: 'text/event-stream' } })
+    await assert.rejects(error.text(), /response exceeded the size limit/)
+    const events = await network.fetch(`${base}/events`, { headers: { accept: 'application/json, text/event-stream' } })
+    assert.equal((await events.text()).length, event.length * 2)
+    const oversizedEvent = await network.fetch(`${base}/large-event`, { headers: { accept: 'text/event-stream' } })
+    await assert.rejects(oversizedEvent.text(), /event exceeded the size limit/)
+    // An OAuth-style request must use the whole-response limit, even if a
+    // server incorrectly labels its body as an event stream.
+    const mislabeled = await network.fetch(`${base}/events`)
+    await assert.rejects(mislabeled.text(), /response exceeded the size limit/)
   } finally { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)) }
 })
 

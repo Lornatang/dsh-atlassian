@@ -1,0 +1,3 @@
+- insert:
+    - id: atlassian
+      name: '@lornatang/dsh-atlassian-bridge'
