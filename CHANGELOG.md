@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.9 - 2026-11-15
+
+- Coordinate OAuth token rotation across processes sharing a profile, including delayed responses, shutdown, callback-port changes, and concurrent session updates.
+- Include a GitHub release archive; npm is not published for this release.
+
 ## 0.1.8 - 2026-11-15
 
 - Serialize rotating OAuth refreshes across concurrent MCP requests, preserve newer credentials after delayed responses, and cancel refreshes on disconnect.

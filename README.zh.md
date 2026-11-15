@@ -34,11 +34,13 @@ dsh plugin --profile <name> add @lornatang/dsh-atlassian
 dsh plugin --profile <name> remove @lornatang/dsh-atlassian
 ```
 
-安装仅发布到 GitHub 的 0.1.8 版本，请运行 `dsh plugin --profile <name> add https://github.com/Lornatang/dsh-atlassian/releases/download/v0.1.8/lornatang-dsh-atlassian-0.1.8.tgz`。npm 仓库中的版本可能较旧。
+安装仅发布到 GitHub 的 0.1.9 版本，请运行 `dsh plugin --profile <name> add https://github.com/Lornatang/dsh-atlassian/releases/download/v0.1.9/lornatang-dsh-atlassian-0.1.9.tgz`。npm 仓库中的版本可能较旧。
 
 `add` 会把本层组合进 profile：profile 的 `cordis.patch.yml` 会增加一条 insert 记录，行 id 为 `atlassian`，包名为 `@lornatang/dsh-atlassian`，并带上随包提供的补丁中的五个值——`mode: cloud`、`serverName: atlassian`、`url: https://mcp.atlassian.com/v1/mcp`、`redirectPort: 3334` 与 `autoOpenBrowser: true`。包的 manifest 声明了 `dsh.bundle.patch: ./cordis.patch.yml`，reconcile 步骤读取的正是这条声明；`remove` 会再次删除该记录。两条命令执行后都要重启 DSH，因为 profile 只在启动时组合自己的行与客户端部分，随后打开 Settings → Atlassian。0.1.5 之前的版本以 `@lornatang/dsh-atlassian-bridge` 发布；添加带作用域的新名称、从同一 profile 删除旧包、重启一次即可——行、其设置与已保存的凭据都会保留。
 
-Cloud 模式在插件加载后立即开始连接。没有已保存会话时，MCP 客户端会返回授权错误，回调服务器绑定 `127.0.0.1:3334`，设置区显示 `Authorization required` 并给出授权链接；等待时间由 `authorizationTimeoutMs` 限制（默认 300000 毫秒）。在浏览器中批准后完成交换，工具完成注册，状态变为 `Connected`。若等待超时，状态变为 `Connection failed` 并带有 `authorization timed out`，此时点击 Connect 会重新尝试，并在 `autoOpenBrowser` 为 true 时打开浏览器。回调端口被占用时会回退到空闲端口，这会清除已保存的客户端注册、令牌与 PKCE verifier，因此下次启动需要重新授权。
+Cloud 模式在插件加载后立即开始连接。没有已保存会话时，MCP 客户端会返回授权错误，回调服务器绑定 `127.0.0.1:3334`，设置区显示 `Authorization required` 并给出授权链接；等待时间由 `authorizationTimeoutMs` 限制（默认 300000 毫秒）。在浏览器中批准后完成交换，工具完成注册，状态变为 `Connected`。若等待超时，状态变为 `Connection failed` 并带有 `authorization timed out`，此时点击 Connect 会重新尝试，并在 `autoOpenBrowser` 为 true 时打开浏览器。回调端口被占用时会回退到空闲端口并保留可用令牌，之后需要交互式授权时会重新注册客户端。
+
+共享同一 profile 的进程使用凭据文件旁的持久 SQLite 锁协调更新。进程运行时请保留该锁文件，并使用支持可靠 SQLite 锁的文件系统。如果进程在授权服务器轮换令牌后、保存响应前退出，可能需要重新授权。
 
 自建模式只在存储中已有凭据时才主动连接；否则设置区显示已配置的服务 URL 与每个服务一张凭据表单，状态保持 `Not connected`。Connect 会把用户名和密码或令牌交给插件，插件用 Jira 的 `GET /rest/api/2/myself` 与 Confluence 的 `GET /rest/api/user/current` 校验，将凭据写入 profile 存储并注册 REST 工具。使用个人访问令牌时把用户名留空：请求改用 `Bearer <token>` 而不是 Basic 认证。
 

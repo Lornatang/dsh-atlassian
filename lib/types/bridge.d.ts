@@ -1,6 +1,6 @@
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
 import { type Logger } from './oauth.js';
-import type { SessionStore } from './store.js';
+import { type SessionStore } from './store.js';
 export interface BridgeHost {
     register(definition: ToolDefinition): () => void;
     logger: Logger;

@@ -5,11 +5,12 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { UnauthorizedError, auth } from '@modelcontextprotocol/sdk/client/auth.js'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
-import { AtlassianOAuthProvider, CallbackServer, createCloudFetch, secureUrl, type Logger } from './oauth.js'
+import { AtlassianOAuthProvider, CallbackServer, RedirectRegistrationChanged, createCloudFetch, secureUrl, type Logger } from './oauth.js'
 import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js'
 import type { OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js'
+import { OAuthTokensSchema } from '@modelcontextprotocol/sdk/shared/auth.js'
 import { openInBrowser } from './open-url.js'
-import type { SessionStore } from './store.js'
+import { sameTokens, type SessionLease, type SessionStore } from './store.js'
 
 export interface BridgeHost { register(definition: ToolDefinition): () => void; logger: Logger }
 export interface BridgeOptions {
@@ -28,6 +29,7 @@ interface OperationContext {
   observedTokens?: OAuthTokens
   refreshExpected?: OAuthTokens
   releaseRefresh?: () => void
+  lease?: SessionLease
 }
 
 async function waitForFlight(flight: Promise<void>, signal: AbortSignal): Promise<void> {
@@ -75,6 +77,7 @@ export class AtlassianBridge {
   #disposed = false
   #controller = new AbortController()
   #flight?: { owner: OperationContext; done: Promise<void> }
+  readonly #refreshes = new Set<Promise<Response>>()
 
   constructor(host: BridgeHost, options: BridgeOptions) {
     this.#host = host
@@ -106,24 +109,58 @@ export class AtlassianBridge {
       while (this.#flight && this.#flight.owner !== operation) await waitForFlight(this.#flight.done, signal)
       if (!active() || signal.aborted) throw new Error('atlassian: connection cancelled')
       operation.refreshExpected = expected
+      const lease = await this.#options.store.acquire(signal)
+      if (!active() || signal.aborted) { lease.release(); throw new Error('atlassian: connection cancelled') }
       const current = this.#options.store.current.tokens
-      if (expected && current !== expected) {
+      if (expected && !sameTokens(current, expected)) {
+        lease.release()
         return new Response(JSON.stringify(current ?? { error: 'invalid_grant' }), { status: current ? 200 : 400, headers: { 'content-type': 'application/json' } })
       }
       if (!this.#flight) {
         let complete!: () => void
         const done = new Promise<void>((resolve) => { complete = resolve })
+        let pending = true
+        let requested = false
         const release = (): void => {
+          if (pending) { requested = true; return }
           if (this.#flight?.owner === operation) { this.#flight = undefined; signal.removeEventListener('abort', release); complete() }
+          if (operation.lease === lease) { operation.lease = undefined; lease.release() }
           if (operation.releaseRefresh === release) operation.releaseRefresh = undefined
         }
         this.#flight = { owner: operation, done }
+        operation.lease = lease
         operation.releaseRefresh = release
         signal.addEventListener('abort', release, { once: true })
-        if (signal.aborted) release()
+        if (signal.aborted) { pending = false; release(); throw new Error('atlassian: connection cancelled') }
+        const exchange = (async (): Promise<Response> => {
+          try {
+            // A cancelled local request may still rotate its token remotely. Finish
+            // and persist the response before allowing another process to refresh.
+            const response = await network.fetch(value, { ...init, signal: AbortSignal.timeout(Math.max(30000, this.#options.toolCallTimeoutMs)) })
+            if (response.ok) {
+              const parsed = OAuthTokensSchema.omit({ issuer: true }).safeParse(await response.clone().json())
+              if (!parsed.success) throw new Error('atlassian: invalid refresh response')
+              const refreshToken = init?.body instanceof URLSearchParams ? init.body.get('refresh_token') ?? undefined : undefined
+              const issuer = expected?.issuer ?? this.#options.store.current.clientInformation?.issuer
+              const tokens: OAuthTokens = { refresh_token: refreshToken, ...parsed.data, ...(issuer ? { issuer } : {}) }
+              await this.#options.store.saveTokens(tokens, () => true, expected, lease)
+            }
+            return response
+          } catch (error) {
+            // If the response was lost, the server may already have rotated it.
+            // Do not let another process reuse the uncertain refresh token.
+            await this.#options.store.clearCredentialsIf(() => true, expected, lease, undefined, 'tokens')
+            throw error
+          } finally {
+            pending = false
+            if (requested) release()
+          }
+        })()
+        this.#refreshes.add(exchange)
+        try { return await exchange } finally { this.#refreshes.delete(exchange) }
       }
-      try { return await network.fetch(value, { ...init, signal }) }
-      catch (error) { operation.releaseRefresh?.(); throw error }
+      lease.release()
+      throw new Error('atlassian: refresh is already in progress')
     }
     this.#provider = new AtlassianOAuthProvider({
       store: options.store, redirectUri: () => this.#callback.redirectUri, allowLoopbackHttp: network.allowLoopbackHttp, logger: host.logger,
@@ -136,6 +173,9 @@ export class AtlassianBridge {
       tokenRead: (tokens) => { const op = this.#operation.getStore(); if (op && !op.observedTokens) op.observedTokens = tokens },
       refreshExpected: () => this.#operation.getStore()?.refreshExpected,
       authFinished: () => { const op = this.#operation.getStore(); op?.releaseRefresh?.(); if (op) op.refreshExpected = undefined },
+      lease: () => this.#operation.getStore()?.lease,
+      observedTokens: () => this.#operation.getStore()?.observedTokens,
+      signal: () => this.#operation.getStore()?.signal,
     })
   }
 
@@ -160,14 +200,11 @@ export class AtlassianBridge {
     const generation = this.#generation
     const boot = (async () => {
       this.#status = 'connecting'
-      await this.#options.store.load()
+      await this.#options.store.load(this.#controller.signal)
       if (this.#disposed || generation !== this.#generation) return
       await this.#callback.listen(this.#options.redirectPort)
       if (this.#disposed || generation !== this.#generation) return
-      const previous = this.#options.store.current.redirectUri
-      const actual = this.#callback.redirectUri
-      if (previous && previous !== actual) await this.#options.store.clear('clientInformation', 'tokens', 'codeVerifier')
-      await this.#options.store.patch({ redirectUri: actual })
+      await this.#options.store.prepareRedirect(this.#callback.redirectUri, this.#controller.signal)
       if (this.#disposed || generation !== this.#generation) return
       this.#launch(false, generation)
       for (let i = 0; i < 600 && this.#status === 'connecting'; i++) await delay(25)
@@ -217,14 +254,20 @@ export class AtlassianBridge {
       check()
       this.#status = 'connecting'
       this.#error = undefined
-      const client = new Client({ name: 'dsh-atlassian', version: '0.1.8' })
+      const client = new Client({ name: 'dsh-atlassian', version: '0.1.9' })
       client.onerror = () => { this.#operation.getStore()?.releaseRefresh?.() }
       const transport = new StreamableHTTPClientTransport(new URL(this.#options.url), { authProvider: this.#provider, fetch: this.#fetch })
       const send = transport.send.bind(transport)
       transport.send = (message, options) => {
         const operation = this.#newOperation()
         return this.#operation.run(operation, async () => {
-          try { return await send(message, options) } catch (error) { operation.releaseRefresh?.(); throw error }
+          try { return await send(message, options) } catch (error) {
+            operation.releaseRefresh?.()
+            if (!(error instanceof RedirectRegistrationChanged)) throw error
+            operation.observedTokens = undefined
+            operation.refreshExpected = undefined
+            return send(message, options)
+          }
         })
       }
       try { await client.connect(transport); check() }
@@ -240,7 +283,7 @@ export class AtlassianBridge {
         check()
         await this.#operation.run(this.#newOperation(), () => auth(this.#provider, { serverUrl: this.#options.url, authorizationCode: callback.code, fetchFn: this.#fetch }))
         check()
-        await this.#options.store.clear('codeVerifier')
+        await this.#options.store.clearCredentialsIf(() => !this.#disposed && generation === this.#generation, undefined, undefined, this.#controller.signal, 'codeVerifier')
         continue
       }
       this.#client = client
@@ -303,7 +346,7 @@ export class AtlassianBridge {
       const items: unknown = JSON.parse(display(result.content))
       const first = Array.isArray(items) ? items[0] : items
       if (first && typeof first === 'object' && typeof (first as Record<string, unknown>)['url'] === 'string') {
-        await this.#options.store.patch({ site: new URL((first as Record<string, string>)['url']!).host })
+        await this.#options.store.patch({ site: new URL((first as Record<string, string>)['url']!).host }, () => !this.#disposed, undefined, undefined, this.#controller.signal)
       }
     } catch { /* The connection can work without a site label. */ }
   }
@@ -324,6 +367,7 @@ export class AtlassianBridge {
     await this.#boot?.catch(() => undefined)
     this.#callback.cancelWait()
     await this.#work
+    await Promise.allSettled([...this.#refreshes])
     await this.#closeClient()
     this.#clearTools()
     await this.#options.store.destroy()
@@ -341,6 +385,7 @@ export class AtlassianBridge {
     await this.#boot?.catch(() => undefined)
     this.#callback.cancelWait()
     await this.#work
+    await Promise.allSettled([...this.#refreshes])
     await this.#closeClient()
     this.#clearTools()
     await this.#callback.close()

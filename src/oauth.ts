@@ -4,10 +4,11 @@ import type { AddressInfo } from 'node:net'
 import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
 import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js'
 import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js'
-import type { SessionStore } from './store.js'
+import type { SessionLease, SessionStore } from './store.js'
 
 export interface Logger { info(message: string): void; warn(message: string): void; error(message: string): void }
 export interface AuthorizationCallback { code: string; state: string | undefined }
+export class RedirectRegistrationChanged extends Error {}
 
 const MAX_CLOUD_RESPONSE_BYTES = 10 * 1024 * 1024
 
@@ -176,8 +177,11 @@ export class AtlassianOAuthProvider implements OAuthClientProvider {
   readonly #tokenRead: (value: OAuthTokens | undefined) => void
   readonly #refreshExpected: () => OAuthTokens | undefined
   readonly #authFinished: () => void
+  readonly #lease: () => SessionLease | undefined
+  readonly #observedTokens: () => OAuthTokens | undefined
+  readonly #signal: () => AbortSignal | undefined
 
-  constructor(options: { store: SessionStore; redirectUri: () => string; onAuthorizationUrl: (url: string) => void; allowLoopbackHttp: boolean; logger: Logger; active?: () => boolean; tokenRead?: (tokens: OAuthTokens | undefined) => void; refreshExpected?: () => OAuthTokens | undefined; authFinished?: () => void }) {
+  constructor(options: { store: SessionStore; redirectUri: () => string; onAuthorizationUrl: (url: string) => void; allowLoopbackHttp: boolean; logger: Logger; active?: () => boolean; tokenRead?: (tokens: OAuthTokens | undefined) => void; refreshExpected?: () => OAuthTokens | undefined; authFinished?: () => void; lease?: () => SessionLease | undefined; observedTokens?: () => OAuthTokens | undefined; signal?: () => AbortSignal | undefined }) {
     this.#store = options.store
     this.#redirect = options.redirectUri
     this.#onUrl = options.onAuthorizationUrl
@@ -186,6 +190,9 @@ export class AtlassianOAuthProvider implements OAuthClientProvider {
     this.#tokenRead = options.tokenRead ?? (() => undefined)
     this.#refreshExpected = options.refreshExpected ?? (() => undefined)
     this.#authFinished = options.authFinished ?? (() => undefined)
+    this.#lease = options.lease ?? (() => undefined)
+    this.#observedTokens = options.observedTokens ?? (() => undefined)
+    this.#signal = options.signal ?? (() => undefined)
   }
   #check(): void { if (!this.#active()) throw new Error('atlassian: connection cancelled') }
   get redirectUrl(): string { this.#check(); return this.#redirect() }
@@ -194,10 +201,10 @@ export class AtlassianOAuthProvider implements OAuthClientProvider {
   }
   state(): string { this.#check(); return randomBytes(16).toString('hex') }
   clientInformation(): OAuthClientInformationMixed | undefined { this.#check(); return this.#store.current.clientInformation }
-  async saveClientInformation(value: OAuthClientInformationMixed): Promise<void> { await this.#store.patch({ clientInformation: value }, this.#active) }
+  async saveClientInformation(value: OAuthClientInformationMixed): Promise<void> { await this.#store.patch({ clientInformation: value }, this.#active, this.#lease(), this.#observedTokens(), this.#signal()) }
   tokens(): OAuthTokens | undefined { this.#check(); const value = this.#store.current.tokens; this.#tokenRead(value); return value }
   async saveTokens(value: OAuthTokens): Promise<void> {
-    try { await this.#store.saveTokens(value, this.#active, this.#refreshExpected()) } finally { this.#authFinished() }
+    try { await this.#store.saveTokens(value, this.#active, this.#refreshExpected(), this.#lease(), this.#signal()) } finally { this.#authFinished() }
   }
   redirectToAuthorization(url: URL): void {
     this.#check()
@@ -206,7 +213,15 @@ export class AtlassianOAuthProvider implements OAuthClientProvider {
     this.#authFinished()
   }
   async saveCodeVerifier(value: string): Promise<void> {
-    try { await this.#store.patch({ codeVerifier: value }, this.#active) } finally { this.#authFinished() }
+    try {
+      const registered = this.#store.current.redirectUri
+      const actual = this.#redirect()
+      if (registered && registered !== actual) {
+        await this.#store.rebindRedirect(actual, this.#observedTokens(), this.#active, this.#lease(), this.#signal())
+        throw new RedirectRegistrationChanged('atlassian: callback changed; restarting authorization')
+      }
+      await this.#store.patch({ codeVerifier: value }, this.#active, this.#lease(), this.#observedTokens(), this.#signal())
+    } finally { this.#authFinished() }
   }
   codeVerifier(): string {
     this.#check()
@@ -217,10 +232,10 @@ export class AtlassianOAuthProvider implements OAuthClientProvider {
   async invalidateCredentials(scope: 'all' | 'client' | 'tokens' | 'verifier' | 'discovery'): Promise<void> {
     try {
       const expected = this.#refreshExpected()
-      if (scope === 'all') await this.#store.clearCredentialsIf(this.#active, expected, 'tokens', 'clientInformation', 'codeVerifier')
-      else if (scope === 'client') await this.#store.clearCredentialsIf(this.#active, expected, 'clientInformation')
-      else if (scope === 'tokens') await this.#store.clearCredentialsIf(this.#active, expected, 'tokens')
-      else if (scope === 'verifier') await this.#store.clearCredentialsIf(this.#active, undefined, 'codeVerifier')
+      if (scope === 'all') await this.#store.clearCredentialsIf(this.#active, expected, this.#lease(), this.#signal(), 'tokens', 'clientInformation', 'codeVerifier')
+      else if (scope === 'client') await this.#store.clearCredentialsIf(this.#active, expected, this.#lease(), this.#signal(), 'clientInformation')
+      else if (scope === 'tokens') await this.#store.clearCredentialsIf(this.#active, expected, this.#lease(), this.#signal(), 'tokens')
+      else if (scope === 'verifier') await this.#store.clearCredentialsIf(this.#active, undefined, this.#lease(), this.#signal(), 'codeVerifier')
     } finally { this.#authFinished() }
   }
 }

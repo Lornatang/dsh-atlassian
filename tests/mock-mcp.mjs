@@ -1,7 +1,7 @@
 import { createServer } from 'node:http'
 import { createHash } from 'node:crypto'
 
-export async function startMockMcp({ initializeDelay = 0, oauth = false, tokenEndpoint, rotateRefresh = false, refreshDelay = 0, staleUnauthorizedDelay = 0, refreshErrorOnce = false, clientSecretBasic = false, serverEvents = false } = {}) {
+export async function startMockMcp({ initializeDelay = 0, oauth = false, tokenEndpoint, rotateRefresh = false, refreshDelay = 0, staleUnauthorizedDelay = 0, refreshErrorOnce = false, dropRefreshResponse = false, clientSecretBasic = false, serverEvents = false, strictRedirect = false } = {}) {
   const calls = []
   let origin
   let challenge
@@ -9,6 +9,8 @@ export async function startMockMcp({ initializeDelay = 0, oauth = false, tokenEn
   let refreshToken = 'mock-refresh'
   let refreshes = 0
   let unauthorized = 0
+  let registrationCount = 0
+  const redirects = new Map()
   const streams = new Set()
   const definitions = [
     { name: 'getAccessibleAtlassianResources', description: 'Get authorized resources', inputSchema: { type: 'object', properties: {} } },
@@ -27,10 +29,14 @@ export async function startMockMcp({ initializeDelay = 0, oauth = false, tokenEn
     if (oauth && path === '/register') {
       const chunks = []
       for await (const chunk of req) chunks.push(chunk)
-      json({ ...JSON.parse(Buffer.concat(chunks).toString()), client_id: 'mock-client', ...(clientSecretBasic ? { client_secret: 'mock-secret', token_endpoint_auth_method: 'client_secret_basic' } : {}) }, 201); return
+      const registration = JSON.parse(Buffer.concat(chunks).toString())
+      const clientId = strictRedirect ? `mock-client-${++registrationCount}` : 'mock-client'
+      redirects.set(clientId, registration.redirect_uris[0])
+      json({ ...registration, client_id: clientId, ...(clientSecretBasic ? { client_secret: 'mock-secret', token_endpoint_auth_method: 'client_secret_basic' } : {}) }, 201); return
     }
     if (oauth && path === '/authorize') {
       const url = new URL(req.url, origin)
+      if (strictRedirect && redirects.get(url.searchParams.get('client_id')) !== url.searchParams.get('redirect_uri')) { json({ error: 'invalid_redirect_uri' }, 400); return }
       challenge = url.searchParams.get('code_challenge')
       const redirect = new URL(url.searchParams.get('redirect_uri'))
       redirect.searchParams.set('state', url.searchParams.get('state'))
@@ -48,6 +54,7 @@ export async function startMockMcp({ initializeDelay = 0, oauth = false, tokenEn
         if (refreshErrorOnce) { refreshErrorOnce = false; json({ error: 'invalid_scope' }, 400); return }
         if (form.get('refresh_token') !== refreshToken) { json({ error: 'invalid_grant' }, 400); return }
         if (rotateRefresh) refreshToken = `rotated-refresh-${refreshes}`
+        if (dropRefreshResponse) { dropRefreshResponse = false; req.socket.destroy(); return }
       }
       else if (form.get('code') !== 'mock-code' || createHash('sha256').update(form.get('code_verifier') || '').digest('base64url') !== challenge) {
         json({ error: 'invalid_grant' }, 400); return
@@ -89,5 +96,5 @@ export async function startMockMcp({ initializeDelay = 0, oauth = false, tokenEn
   })
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   origin = `http://127.0.0.1:${server.address().port}`
-  return { url: `${origin}/mcp`, calls, streams: () => streams.size, expire: () => { accessToken = 'refreshed-access-token'; for (const stream of streams) stream.end() }, refreshes: () => refreshes, close: () => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve) }) }
+  return { url: `${origin}/mcp`, calls, streams: () => streams.size, expire: () => { accessToken = 'refreshed-access-token'; for (const stream of streams) stream.end() }, revokeRefresh: () => { refreshToken = 'replacement-refresh' }, refreshes: () => refreshes, close: () => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve) }) }
 }

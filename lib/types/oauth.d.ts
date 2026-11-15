@@ -1,7 +1,7 @@
 import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js';
 import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
-import type { SessionStore } from './store.js';
+import type { SessionLease, SessionStore } from './store.js';
 export interface Logger {
     info(message: string): void;
     warn(message: string): void;
@@ -10,6 +10,8 @@ export interface Logger {
 export interface AuthorizationCallback {
     code: string;
     state: string | undefined;
+}
+export declare class RedirectRegistrationChanged extends Error {
 }
 export declare function secureUrl(url: URL, allowLoopbackHttp: boolean): void;
 /** Restrict every discovered OAuth and MCP endpoint, including redirect targets. */
@@ -37,6 +39,9 @@ export declare class AtlassianOAuthProvider implements OAuthClientProvider {
         tokenRead?: (tokens: OAuthTokens | undefined) => void;
         refreshExpected?: () => OAuthTokens | undefined;
         authFinished?: () => void;
+        lease?: () => SessionLease | undefined;
+        observedTokens?: () => OAuthTokens | undefined;
+        signal?: () => AbortSignal | undefined;
     });
     get redirectUrl(): string;
     get clientMetadata(): OAuthClientMetadata;

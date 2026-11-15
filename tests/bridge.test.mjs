@@ -3,6 +3,8 @@ import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
+import { fork } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import { AtlassianBridge } from '../lib/bridge.js'
 import { JiraBoard } from '../lib/board.js'
@@ -14,6 +16,216 @@ async function waitFor(predicate) {
   for (let i = 0; i < 100; i++) { if (predicate()) return; await delay(25) }
   throw new Error('bridge did not become ready')
 }
+
+function childBridge(url, file, port) {
+  const child = fork(fileURLToPath(new URL('./fixtures/cross-process-bridge.mjs', import.meta.url)), [url, file, String(port)], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
+  const pending = new Map()
+  let next = 0
+  child.on('message', ({ id, result, error }) => {
+    const task = pending.get(id)
+    if (!task) return
+    pending.delete(id)
+    if (error) task.reject(new Error(error))
+    else task.resolve(result)
+  })
+  child.on('exit', (code) => {
+    for (const task of pending.values()) task.reject(new Error(`bridge child exited: ${code}`))
+    pending.clear()
+  })
+  return {
+    send(command) {
+      return new Promise((resolve, reject) => { const id = ++next; pending.set(id, { resolve, reject }); child.send({ id, command }) })
+    },
+    kill() { child.kill() },
+  }
+}
+
+for (const staleUnauthorizedDelay of [0, 300]) test(`independent processes share rotating credentials, delayed 401=${staleUnauthorizedDelay}`, async () => {
+  const mock = await startMockMcp({ oauth: true, rotateRefresh: true, refreshDelay: 150, staleUnauthorizedDelay })
+  const root = await mkdtemp(join(tmpdir(), 'atlassian-process-refresh-'))
+  const file = join(root, 'session.json')
+  const bridge = new AtlassianBridge({ logger, register() { return () => {} } }, {
+    serverName: 'atlassian', url: mock.url, redirectPort: 0, toolCallTimeoutMs: 5000,
+    expectedSite: '', authorizationTimeoutMs: 5000, autoOpenBrowser: false, store: new SessionStore(file),
+  })
+  let child
+  try {
+    await bridge.start()
+    await waitFor(() => bridge.snapshot().status === 'authorizing')
+    await fetch(bridge.snapshot().authorizationUrl)
+    await waitFor(() => bridge.snapshot().status === 'ready')
+    const before = JSON.parse(await readFile(file, 'utf8'))
+    child = childBridge(mock.url, file, Number(new URL(before.redirectUri).port))
+    const secondary = await child.send('start')
+    assert.equal(secondary.status, 'ready')
+    assert.deepEqual(JSON.parse(await readFile(file, 'utf8')).tokens, before.tokens)
+    mock.expire()
+    await Promise.all([bridge.callTool('getJiraIssue', { issueIdOrKey: 'DEMO-1' }), child.send('call')])
+    assert.equal(mock.refreshes(), 1)
+    assert.equal(JSON.parse(await readFile(file, 'utf8')).tokens.refresh_token, 'rotated-refresh-1')
+    await child.send('call')
+  } finally {
+    if (child) { await child.send('dispose').catch(() => {}); child.kill() }
+    await bridge.dispose()
+    await mock.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a stale process cannot restore credentials after another disconnects', async () => {
+  const mock = await startMockMcp({ oauth: true, rotateRefresh: true })
+  const root = await mkdtemp(join(tmpdir(), 'atlassian-process-disconnect-'))
+  const file = join(root, 'session.json')
+  const bridge = new AtlassianBridge({ logger, register() { return () => {} } }, {
+    serverName: 'atlassian', url: mock.url, redirectPort: 0, toolCallTimeoutMs: 5000,
+    expectedSite: '', authorizationTimeoutMs: 5000, autoOpenBrowser: false, store: new SessionStore(file),
+  })
+  let child
+  try {
+    await bridge.start()
+    await waitFor(() => bridge.snapshot().status === 'authorizing')
+    await fetch(bridge.snapshot().authorizationUrl)
+    await waitFor(() => bridge.snapshot().status === 'ready')
+    const saved = JSON.parse(await readFile(file, 'utf8'))
+    child = childBridge(mock.url, file, Number(new URL(saved.redirectUri).port))
+    assert.equal((await child.send('start')).status, 'ready')
+    await bridge.disconnect()
+    mock.expire()
+    await assert.rejects(child.send('call'))
+    await assert.rejects(stat(file), { code: 'ENOENT' })
+    assert.equal(mock.refreshes(), 0)
+  } finally {
+    if (child) { await child.send('dispose').catch(() => {}); child.kill() }
+    await bridge.dispose()
+    await mock.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('disposing a process waits for its already-sent refresh before another refreshes', async () => {
+  const mock = await startMockMcp({ oauth: true, rotateRefresh: true, refreshDelay: 400 })
+  const root = await mkdtemp(join(tmpdir(), 'atlassian-process-dispose-'))
+  const file = join(root, 'session.json')
+  const bridge = new AtlassianBridge({ logger, register() { return () => {} } }, {
+    serverName: 'atlassian', url: mock.url, redirectPort: 0, toolCallTimeoutMs: 5000,
+    expectedSite: '', authorizationTimeoutMs: 5000, autoOpenBrowser: false, store: new SessionStore(file),
+  })
+  let child
+  try {
+    await bridge.start()
+    await waitFor(() => bridge.snapshot().status === 'authorizing')
+    await fetch(bridge.snapshot().authorizationUrl)
+    await waitFor(() => bridge.snapshot().status === 'ready')
+    const saved = JSON.parse(await readFile(file, 'utf8'))
+    child = childBridge(mock.url, file, Number(new URL(saved.redirectUri).port))
+    assert.equal((await child.send('start')).status, 'ready')
+    mock.expire()
+    const first = bridge.callTool('getJiraIssue', { issueIdOrKey: 'DEMO-1' }).catch(() => undefined)
+    await waitFor(() => mock.refreshes() === 1)
+    const disposed = bridge.dispose()
+    const second = child.send('call')
+    await Promise.all([first, disposed, second])
+    assert.equal(mock.refreshes(), 1)
+    assert.equal(JSON.parse(await readFile(file, 'utf8')).tokens.refresh_token, 'rotated-refresh-1')
+  } finally {
+    if (child) { await child.send('dispose').catch(() => {}); child.kill() }
+    await bridge.dispose()
+    await mock.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a lost refresh response is not retried with a possibly rotated token', async () => {
+  const mock = await startMockMcp({ oauth: true, rotateRefresh: true, dropRefreshResponse: true })
+  const root = await mkdtemp(join(tmpdir(), 'atlassian-process-lost-refresh-'))
+  const file = join(root, 'session.json')
+  const bridge = new AtlassianBridge({ logger, register() { return () => {} } }, {
+    serverName: 'atlassian', url: mock.url, redirectPort: 0, toolCallTimeoutMs: 5000,
+    expectedSite: '', authorizationTimeoutMs: 5000, autoOpenBrowser: false, store: new SessionStore(file),
+  })
+  let child
+  try {
+    await bridge.start()
+    await waitFor(() => bridge.snapshot().status === 'authorizing')
+    await fetch(bridge.snapshot().authorizationUrl)
+    await waitFor(() => bridge.snapshot().status === 'ready')
+    const saved = JSON.parse(await readFile(file, 'utf8'))
+    child = childBridge(mock.url, file, Number(new URL(saved.redirectUri).port))
+    assert.equal((await child.send('start')).status, 'ready')
+    mock.expire()
+    await assert.rejects(bridge.callTool('getJiraIssue', { issueIdOrKey: 'DEMO-1' }))
+    await assert.rejects(child.send('call'))
+    assert.equal(mock.refreshes(), 1)
+    assert.equal(JSON.parse(await readFile(file, 'utf8')).tokens, undefined)
+  } finally {
+    if (child) { await child.send('dispose').catch(() => {}); child.kill() }
+    await bridge.dispose()
+    await mock.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a fallback callback port re-registers before interactive reauthorization', async () => {
+  const mock = await startMockMcp({ oauth: true, strictRedirect: true })
+  const root = await mkdtemp(join(tmpdir(), 'atlassian-process-redirect-'))
+  const file = join(root, 'session.json')
+  const bridge = new AtlassianBridge({ logger, register() { return () => {} } }, {
+    serverName: 'atlassian', url: mock.url, redirectPort: 0, toolCallTimeoutMs: 5000,
+    expectedSite: '', authorizationTimeoutMs: 5000, autoOpenBrowser: false, store: new SessionStore(file),
+  })
+  let child
+  try {
+    await bridge.start()
+    await waitFor(() => bridge.snapshot().status === 'authorizing')
+    assert.equal((await fetch(bridge.snapshot().authorizationUrl)).status, 200)
+    await waitFor(() => bridge.snapshot().status === 'ready')
+    const saved = JSON.parse(await readFile(file, 'utf8'))
+    child = childBridge(mock.url, file, Number(new URL(saved.redirectUri).port))
+    assert.equal((await child.send('start')).status, 'ready')
+    mock.expire()
+    mock.revokeRefresh()
+    await assert.rejects(child.send('call'))
+    const state = await child.send('authorize')
+    assert.equal(state.status, 'authorizing')
+    assert.notEqual(new URL(state.authorizationUrl).searchParams.get('redirect_uri'), saved.redirectUri)
+    assert.equal((await fetch(state.authorizationUrl)).status, 200)
+    for (let i = 0; i < 100; i++) {
+      if ((await child.send('snapshot')).status === 'ready') break
+      await delay(25)
+    }
+    assert.equal((await child.send('snapshot')).status, 'ready')
+    await child.send('call')
+  } finally {
+    if (child) { await child.send('dispose').catch(() => {}); child.kill() }
+    await bridge.dispose()
+    await mock.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('session writes merge across processes and a crashed lock holder is released', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'atlassian-process-store-'))
+  const file = join(root, 'session.json')
+  const store = new SessionStore(file)
+  const child = childBridge('http://127.0.0.1:1/mcp', file, 0)
+  try {
+    await store.load()
+    await Promise.all([store.patch({ site: 'example.test' }), child.send('patch')])
+    const saved = JSON.parse(await readFile(file, 'utf8'))
+    assert.equal(saved.site, 'example.test')
+    assert.equal(saved.codeVerifier, 'child-verifier')
+    await child.send('hold')
+    const controller = new AbortController()
+    const cancelled = store.patch({ site: 'cancelled.test' }, () => true, undefined, undefined, controller.signal)
+    controller.abort()
+    await assert.rejects(cancelled, /cancelled/)
+    const waiting = store.patch({ site: 'after-crash.test' })
+    await delay(50)
+    child.kill()
+    await waiting
+    assert.equal(JSON.parse(await readFile(file, 'utf8')).site, 'after-crash.test')
+  } finally { child.kill(); await rm(root, { recursive: true, force: true }) }
+})
 
 test('connects to MCP, registers usable tools and loads a Jira board', async () => {
   const mock = await startMockMcp()

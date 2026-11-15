@@ -3,6 +3,8 @@ import { constants } from 'node:fs'
 import { lstat, mkdir, open, rename, rm, type FileHandle } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+import { setTimeout as delay } from 'node:timers/promises'
 import type { OAuthClientInformationMixed, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js'
 
 export interface StoredSession {
@@ -17,6 +19,18 @@ export interface StoredSession {
 
 export interface ServerCredential { username?: string; secret: string }
 export interface ServerCredentials { jira?: ServerCredential; confluence?: ServerCredential }
+
+/** Compare the bearer and refresh credentials, not object identity across reloads. */
+export function sameTokens(left: OAuthTokens | undefined, right: OAuthTokens | undefined): boolean {
+  return left === right || !!left && !!right && left.access_token === right.access_token && left.refresh_token === right.refresh_token
+}
+
+export interface SessionLease {
+  readonly owner: SessionStore
+  readonly active: boolean
+  run<T>(work: () => Promise<T>): Promise<T>
+  release(): void
+}
 
 /** Keep credentials separate for each DSH profile and server. */
 export function sessionFileFor(serverName: string, url: string, patchPath?: string): string {
@@ -61,62 +75,152 @@ async function secureExistingFile(file: string): Promise<FileHandle | undefined>
 export class SessionStore {
   readonly #file: string
   #value: StoredSession = { version: 1 }
-  #tail: Promise<unknown> = Promise.resolve()
 
   constructor(file: string) { this.#file = file }
   get file(): string { return this.#file }
   get current(): StoredSession { return this.#value }
 
-  async load(): Promise<StoredSession> {
-    return this.#serialize(async () => {
-      const handle = await secureExistingFile(this.#file)
-      if (!handle) return this.#value = { version: 1 }
-      let raw: string
-      try { raw = await handle.readFile('utf8') } finally { await handle.close() }
-      let parsed: unknown
-      try { parsed = JSON.parse(raw.replace(/^\uFEFF/, '')) } catch (error) {
-        throw new Error(`atlassian: invalid credential file: ${this.#file}`, { cause: error })
+  /** Hold an OS-backed lock across the complete OAuth refresh exchange. */
+  async acquire(signal?: AbortSignal): Promise<SessionLease> {
+    const lockFile = `${this.#file}.lock.sqlite`
+    await mkdir(dirname(lockFile), { recursive: true, mode: 0o700 })
+    try { await (await open(lockFile, 'wx', 0o600)).close() } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+    }
+    await (await secureExistingFile(lockFile))?.close()
+    const db = new DatabaseSync(lockFile)
+    let locked = false
+    try {
+      for (;;) {
+        if (signal?.aborted) throw new Error('atlassian: connection cancelled')
+        try { db.exec('BEGIN IMMEDIATE'); locked = true; break } catch (error) {
+          const code = (error as { errcode?: number }).errcode
+          if (code === undefined || (code & 0xff) !== 5) throw error
+          try { await delay(25, undefined, { signal }) } catch { throw new Error('atlassian: connection cancelled') }
+        }
       }
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || (parsed as StoredSession).version !== 1) {
-        throw new Error(`atlassian: invalid credential file: ${this.#file}`)
+      await this.#read()
+      let active = true
+      let running = 0
+      let closed = false
+      const close = (): void => {
+        if (closed || active || running) return
+        closed = true
+        try { db.exec('ROLLBACK') } finally { db.close() }
       }
-      this.#value = parsed as StoredSession
-      return this.#value
-    })
+      return {
+        owner: this,
+        get active() { return active },
+        async run<T>(work: () => Promise<T>): Promise<T> {
+          if (!active) throw new Error('atlassian: invalid session lock')
+          running++
+          try { return await work() } finally { running--; close() }
+        },
+        release() {
+          if (!active) return
+          active = false
+          close()
+        },
+      }
+    } catch (error) {
+      if (locked) { try { db.exec('ROLLBACK') } catch { /* closing also releases the lock */ } }
+      db.close()
+      throw error
+    }
   }
 
-  async patch(patch: Partial<StoredSession>, active?: () => boolean): Promise<void> {
-    await this.#serialize(async () => {
+  async #withLease<T>(work: () => Promise<T>, lease?: SessionLease, signal?: AbortSignal): Promise<T> {
+    if (lease) {
+      if (lease.owner !== this || !lease.active) throw new Error('atlassian: invalid session lock')
+      return lease.run(work)
+    }
+    const acquired = await this.acquire(signal)
+    try { return await work() } finally { acquired.release() }
+  }
+
+  async load(signal?: AbortSignal): Promise<StoredSession> {
+    return this.#withLease(async () => this.#value, undefined, signal)
+  }
+
+  async #read(): Promise<StoredSession> {
+    const handle = await secureExistingFile(this.#file)
+    if (!handle) return this.#value = { version: 1 }
+    let raw: string
+    try { raw = await handle.readFile('utf8') } finally { await handle.close() }
+    let parsed: unknown
+    try { parsed = JSON.parse(raw.replace(/^\uFEFF/, '')) } catch (error) {
+      throw new Error(`atlassian: invalid credential file: ${this.#file}`, { cause: error })
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || (parsed as StoredSession).version !== 1) {
+      throw new Error(`atlassian: invalid credential file: ${this.#file}`)
+    }
+    this.#value = parsed as StoredSession
+    return this.#value
+  }
+
+  async patch(patch: Partial<StoredSession>, active?: () => boolean, lease?: SessionLease, expected?: OAuthTokens, signal?: AbortSignal): Promise<void> {
+    await this.#withLease(async () => {
       if (active && !active()) throw new Error('atlassian: connection cancelled')
+      if (expected && !sameTokens(this.#value.tokens, expected)) throw new Error('atlassian: credentials changed; reconnect to continue')
       const next = { ...this.#value, ...patch, version: 1 as const }
       await this.#flush(next)
       this.#value = next
-    })
+    }, lease, signal)
   }
 
-  async saveTokens(tokens: OAuthTokens, active: () => boolean, expected?: OAuthTokens): Promise<void> {
-    await this.#serialize(async () => {
+  /** A secondary process must not discard credentials merely because its callback port is busy. */
+  async prepareRedirect(actual: string, signal?: AbortSignal): Promise<void> {
+    await this.#withLease(async () => {
+      const previous = this.#value.redirectUri
+      if (previous && previous !== actual && this.#value.tokens) return
+      const next: StoredSession = { ...this.#value, redirectUri: actual, version: 1 }
+      if (previous && previous !== actual) {
+        delete next.clientInformation
+        delete next.tokens
+        delete next.codeVerifier
+      }
+      await this.#flush(next)
+      this.#value = next
+    }, undefined, signal)
+  }
+
+  /** Re-register only when a new interactive flow needs a different callback. */
+  async rebindRedirect(actual: string, expected: OAuthTokens | undefined, active: () => boolean, lease?: SessionLease, signal?: AbortSignal): Promise<void> {
+    await this.#withLease(async () => {
       if (!active()) throw new Error('atlassian: connection cancelled')
-      if (expected && this.#value.tokens !== expected) return
+      if (expected && this.#value.tokens && !sameTokens(this.#value.tokens, expected)) return
+      const next: StoredSession = { ...this.#value, redirectUri: actual, version: 1 }
+      delete next.clientInformation
+      delete next.tokens
+      delete next.codeVerifier
+      await this.#flush(next)
+      this.#value = next
+    }, lease, signal)
+  }
+
+  async saveTokens(tokens: OAuthTokens, active: () => boolean, expected?: OAuthTokens, lease?: SessionLease, signal?: AbortSignal): Promise<void> {
+    await this.#withLease(async () => {
+      if (!active()) throw new Error('atlassian: connection cancelled')
+      if (expected && !sameTokens(this.#value.tokens, expected) && !sameTokens(this.#value.tokens, tokens)) return
       const next = { ...this.#value, tokens, version: 1 as const }
       await this.#flush(next)
       this.#value = next
-    })
+    }, lease, signal)
   }
 
-  async clearCredentialsIf(active: () => boolean, expected: OAuthTokens | undefined, ...fields: readonly (keyof StoredSession)[]): Promise<void> {
-    await this.#serialize(async () => {
+  async clearCredentialsIf(active: () => boolean, expected: OAuthTokens | undefined, lease: SessionLease | undefined, signal: AbortSignal | undefined, ...fields: readonly (keyof StoredSession)[]): Promise<void> {
+    await this.#withLease(async () => {
       if (!active()) throw new Error('atlassian: connection cancelled')
-      if (expected && this.#value.tokens !== expected) return
+      if (expected && !sameTokens(this.#value.tokens, expected)) return
       const next: StoredSession = { ...this.#value, version: 1 }
       for (const field of fields) if (field !== 'version') delete next[field]
       await this.#flush(next)
       this.#value = next
-    })
+    }, lease, signal)
   }
 
   async clear(...fields: readonly (keyof StoredSession)[]): Promise<void> {
-    await this.#serialize(async () => {
+    await this.#withLease(async () => {
       const next: StoredSession = { ...this.#value, version: 1 }
       for (const field of fields) if (field !== 'version') delete next[field]
       await this.#flush(next)
@@ -125,7 +229,7 @@ export class SessionStore {
   }
 
   async destroy(): Promise<void> {
-    await this.#serialize(async () => {
+    await this.#withLease(async () => {
       await (await secureExistingFile(this.#file))?.close()
       await rm(this.#file, { force: true })
       this.#value = { version: 1 }
@@ -143,11 +247,5 @@ export class SessionStore {
     } finally {
       await rm(temporary, { force: true })
     }
-  }
-
-  #serialize<T>(work: () => Promise<T>): Promise<T> {
-    const run = this.#tail.then(work, work)
-    this.#tail = run.then(() => undefined, () => undefined)
-    return run
   }
 }
