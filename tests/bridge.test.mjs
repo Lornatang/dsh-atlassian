@@ -266,6 +266,26 @@ test('a second store in the same process cannot release another store’s cross-
   } finally { abort.abort(); lease?.release(); await child.kill(); await rm(root, { recursive: true, force: true }) }
 })
 
+test('an authorization started without tokens cannot replace a newer session', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'atlassian-stale-authorization-'))
+  const file = join(root, 'session.json')
+  const stale = new SessionStore(file)
+  const winner = new SessionStore(file)
+  const tokens = { access_token: 'new-access', refresh_token: 'new-refresh', token_type: 'Bearer' }
+  try {
+    await stale.load()
+    await winner.patch({ tokens, clientInformation: { client_id: 'new-client' }, redirectUri: 'http://127.0.0.1:3334/callback' })
+    await assert.rejects(stale.patch({ clientInformation: { client_id: 'old-client' } }, () => true, undefined, undefined, undefined, true), /credentials changed/)
+    await stale.saveTokens({ access_token: 'old-access', token_type: 'Bearer' }, () => true, undefined, undefined, undefined, true)
+    await stale.rebindRedirect('http://127.0.0.1:4444/callback', undefined, () => true)
+    await stale.clearCredentialsIf(() => true, undefined, undefined, undefined, true, 'tokens', 'clientInformation')
+    const saved = JSON.parse(await readFile(file, 'utf8'))
+    assert.deepEqual(saved.tokens, tokens)
+    assert.equal(saved.clientInformation.client_id, 'new-client')
+    assert.equal(saved.redirectUri, 'http://127.0.0.1:3334/callback')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('disposal interrupts a site update waiting for another process', async () => {
   const mock = await startMockMcp({ resourceDelay: 400 })
   const root = await mkdtemp(join(tmpdir(), 'atlassian-process-site-'))

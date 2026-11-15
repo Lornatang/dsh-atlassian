@@ -89,7 +89,12 @@ export class AtlassianBridge {
     }
     this.#fetch = async (value, init) => {
       const operation = this.#operation.getStore()
-      if (!operation) return network.fetch(value, init)
+      if (!operation) {
+        if (init?.body instanceof URLSearchParams && init.body.get('grant_type') === 'refresh_token') {
+          throw new Error('atlassian: refresh requires an active connection operation')
+        }
+        return network.fetch(value, init)
+      }
       if (!active()) throw new Error('atlassian: connection cancelled')
       const signals = [operation.signal]
       if (init?.signal) signals.push(init.signal)
@@ -149,7 +154,7 @@ export class AtlassianBridge {
           } catch (error) {
             // If the response was lost, the server may already have rotated it.
             // Do not let another process reuse the uncertain refresh token.
-            await this.#options.store.clearCredentialsIf(() => true, expected, lease, undefined, 'tokens')
+            await this.#options.store.clearCredentialsIf(() => true, expected, lease, undefined, true, 'tokens')
             throw error
           } finally {
             pending = false
@@ -287,7 +292,7 @@ export class AtlassianBridge {
         check()
         await this.#operation.run(this.#newOperation(), () => auth(this.#provider, { serverUrl: this.#options.url, authorizationCode: callback.code, fetchFn: this.#fetch }))
         check()
-        await this.#options.store.clearCredentialsIf(() => !this.#disposed && generation === this.#generation, undefined, undefined, this.#controller.signal, 'codeVerifier')
+        await this.#options.store.clearCredentialsIf(() => !this.#disposed && generation === this.#generation, undefined, undefined, this.#controller.signal, false, 'codeVerifier')
         continue
       }
       this.#client = client

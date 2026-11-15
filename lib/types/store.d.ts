@@ -35,13 +35,13 @@ export declare class SessionStore {
     /** Hold an OS-backed lock across the complete OAuth refresh exchange. */
     acquire(signal?: AbortSignal): Promise<SessionLease>;
     load(signal?: AbortSignal): Promise<StoredSession>;
-    patch(patch: Partial<StoredSession>, active?: () => boolean, lease?: SessionLease, expected?: OAuthTokens, signal?: AbortSignal): Promise<void>;
+    patch(patch: Partial<StoredSession>, active?: () => boolean, lease?: SessionLease, expected?: OAuthTokens, signal?: AbortSignal, guard?: boolean): Promise<void>;
     /** A secondary process must not discard credentials merely because its callback port is busy. */
     prepareRedirect(actual: string, signal?: AbortSignal): Promise<void>;
     /** Re-register only when a new interactive flow needs a different callback. */
     rebindRedirect(actual: string, expected: OAuthTokens | undefined, active: () => boolean, lease?: SessionLease, signal?: AbortSignal): Promise<void>;
-    saveTokens(tokens: OAuthTokens, active: () => boolean, expected?: OAuthTokens, lease?: SessionLease, signal?: AbortSignal): Promise<void>;
-    clearCredentialsIf(active: () => boolean, expected: OAuthTokens | undefined, lease: SessionLease | undefined, signal: AbortSignal | undefined, ...fields: readonly (keyof StoredSession)[]): Promise<void>;
+    saveTokens(tokens: OAuthTokens, active: () => boolean, expected?: OAuthTokens, lease?: SessionLease, signal?: AbortSignal, guard?: boolean): Promise<void>;
+    clearCredentialsIf(active: () => boolean, expected: OAuthTokens | undefined, lease: SessionLease | undefined, signal: AbortSignal | undefined, guard: boolean, ...fields: readonly (keyof StoredSession)[]): Promise<void>;
     clear(...fields: readonly (keyof StoredSession)[]): Promise<void>;
     destroy(): Promise<void>;
 }

@@ -165,10 +165,10 @@ export class SessionStore {
     return this.#value
   }
 
-  async patch(patch: Partial<StoredSession>, active?: () => boolean, lease?: SessionLease, expected?: OAuthTokens, signal?: AbortSignal): Promise<void> {
+  async patch(patch: Partial<StoredSession>, active?: () => boolean, lease?: SessionLease, expected?: OAuthTokens, signal?: AbortSignal, guard = false): Promise<void> {
     await this.#withLease(async () => {
       if (active && !active()) throw new Error('atlassian: connection cancelled')
-      if (expected && !sameTokens(this.#value.tokens, expected)) throw new Error('atlassian: credentials changed; reconnect to continue')
+      if ((expected || guard) && !sameTokens(this.#value.tokens, expected)) throw new Error('atlassian: credentials changed; reconnect to continue')
       const next = { ...this.#value, ...patch, version: 1 as const }
       await this.#flush(next)
       this.#value = next
@@ -195,7 +195,7 @@ export class SessionStore {
   async rebindRedirect(actual: string, expected: OAuthTokens | undefined, active: () => boolean, lease?: SessionLease, signal?: AbortSignal): Promise<void> {
     await this.#withLease(async () => {
       if (!active()) throw new Error('atlassian: connection cancelled')
-      if (expected && this.#value.tokens && !sameTokens(this.#value.tokens, expected)) return
+      if (this.#value.tokens && !sameTokens(this.#value.tokens, expected)) return
       const next: StoredSession = { ...this.#value, redirectUri: actual, version: 1 }
       delete next.clientInformation
       delete next.tokens
@@ -205,20 +205,20 @@ export class SessionStore {
     }, lease, signal)
   }
 
-  async saveTokens(tokens: OAuthTokens, active: () => boolean, expected?: OAuthTokens, lease?: SessionLease, signal?: AbortSignal): Promise<void> {
+  async saveTokens(tokens: OAuthTokens, active: () => boolean, expected?: OAuthTokens, lease?: SessionLease, signal?: AbortSignal, guard = false): Promise<void> {
     await this.#withLease(async () => {
       if (!active()) throw new Error('atlassian: connection cancelled')
-      if (expected && !sameTokens(this.#value.tokens, expected) && !sameTokens(this.#value.tokens, tokens)) return
+      if ((expected || guard) && !sameTokens(this.#value.tokens, expected) && !sameTokens(this.#value.tokens, tokens)) return
       const next = { ...this.#value, tokens, version: 1 as const }
       await this.#flush(next)
       this.#value = next
     }, lease, signal)
   }
 
-  async clearCredentialsIf(active: () => boolean, expected: OAuthTokens | undefined, lease: SessionLease | undefined, signal: AbortSignal | undefined, ...fields: readonly (keyof StoredSession)[]): Promise<void> {
+  async clearCredentialsIf(active: () => boolean, expected: OAuthTokens | undefined, lease: SessionLease | undefined, signal: AbortSignal | undefined, guard: boolean, ...fields: readonly (keyof StoredSession)[]): Promise<void> {
     await this.#withLease(async () => {
       if (!active()) throw new Error('atlassian: connection cancelled')
-      if (expected && !sameTokens(this.#value.tokens, expected)) return
+      if ((expected || guard) && !sameTokens(this.#value.tokens, expected)) return
       const next: StoredSession = { ...this.#value, version: 1 }
       for (const field of fields) if (field !== 'version') delete next[field]
       await this.#flush(next)

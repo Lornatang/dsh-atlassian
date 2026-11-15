@@ -201,10 +201,10 @@ export class AtlassianOAuthProvider implements OAuthClientProvider {
   }
   state(): string { this.#check(); return randomBytes(16).toString('hex') }
   clientInformation(): OAuthClientInformationMixed | undefined { this.#check(); return this.#store.current.clientInformation }
-  async saveClientInformation(value: OAuthClientInformationMixed): Promise<void> { await this.#store.patch({ clientInformation: value }, this.#active, this.#lease(), this.#observedTokens(), this.#signal()) }
+  async saveClientInformation(value: OAuthClientInformationMixed): Promise<void> { await this.#store.patch({ clientInformation: value }, this.#active, this.#lease(), this.#observedTokens(), this.#signal(), true) }
   tokens(): OAuthTokens | undefined { this.#check(); const value = this.#store.current.tokens; this.#tokenRead(value); return value }
   async saveTokens(value: OAuthTokens): Promise<void> {
-    try { await this.#store.saveTokens(value, this.#active, this.#refreshExpected(), this.#lease(), this.#signal()) } finally { this.#authFinished() }
+    try { await this.#store.saveTokens(value, this.#active, this.#refreshExpected() ?? this.#observedTokens(), this.#lease(), this.#signal(), true) } finally { this.#authFinished() }
   }
   redirectToAuthorization(url: URL): void {
     this.#check()
@@ -220,7 +220,7 @@ export class AtlassianOAuthProvider implements OAuthClientProvider {
         await this.#store.rebindRedirect(actual, this.#observedTokens(), this.#active, this.#lease(), this.#signal())
         throw new RedirectRegistrationChanged('atlassian: callback changed; restarting authorization')
       }
-      await this.#store.patch({ codeVerifier: value }, this.#active, this.#lease(), this.#observedTokens(), this.#signal())
+      await this.#store.patch({ codeVerifier: value }, this.#active, this.#lease(), this.#observedTokens(), this.#signal(), true)
     } finally { this.#authFinished() }
   }
   codeVerifier(): string {
@@ -231,11 +231,11 @@ export class AtlassianOAuthProvider implements OAuthClientProvider {
   }
   async invalidateCredentials(scope: 'all' | 'client' | 'tokens' | 'verifier' | 'discovery'): Promise<void> {
     try {
-      const expected = this.#refreshExpected()
-      if (scope === 'all') await this.#store.clearCredentialsIf(this.#active, expected, this.#lease(), this.#signal(), 'tokens', 'clientInformation', 'codeVerifier')
-      else if (scope === 'client') await this.#store.clearCredentialsIf(this.#active, expected, this.#lease(), this.#signal(), 'clientInformation')
-      else if (scope === 'tokens') await this.#store.clearCredentialsIf(this.#active, expected, this.#lease(), this.#signal(), 'tokens')
-      else if (scope === 'verifier') await this.#store.clearCredentialsIf(this.#active, undefined, this.#lease(), this.#signal(), 'codeVerifier')
+      const expected = this.#refreshExpected() ?? this.#observedTokens()
+      if (scope === 'all') await this.#store.clearCredentialsIf(this.#active, expected, this.#lease(), this.#signal(), true, 'tokens', 'clientInformation', 'codeVerifier')
+      else if (scope === 'client') await this.#store.clearCredentialsIf(this.#active, expected, this.#lease(), this.#signal(), true, 'clientInformation')
+      else if (scope === 'tokens') await this.#store.clearCredentialsIf(this.#active, expected, this.#lease(), this.#signal(), true, 'tokens')
+      else if (scope === 'verifier') await this.#store.clearCredentialsIf(this.#active, expected, this.#lease(), this.#signal(), true, 'codeVerifier')
     } finally { this.#authFinished() }
   }
 }
