@@ -85,9 +85,31 @@ export class SessionStore {
     })
   }
 
-  async patch(patch: Partial<StoredSession>): Promise<void> {
+  async patch(patch: Partial<StoredSession>, active?: () => boolean): Promise<void> {
     await this.#serialize(async () => {
+      if (active && !active()) throw new Error('atlassian: connection cancelled')
       const next = { ...this.#value, ...patch, version: 1 as const }
+      await this.#flush(next)
+      this.#value = next
+    })
+  }
+
+  async saveTokens(tokens: OAuthTokens, active: () => boolean, expected?: OAuthTokens): Promise<void> {
+    await this.#serialize(async () => {
+      if (!active()) throw new Error('atlassian: connection cancelled')
+      if (expected && this.#value.tokens !== expected) return
+      const next = { ...this.#value, tokens, version: 1 as const }
+      await this.#flush(next)
+      this.#value = next
+    })
+  }
+
+  async clearCredentialsIf(active: () => boolean, expected: OAuthTokens | undefined, ...fields: readonly (keyof StoredSession)[]): Promise<void> {
+    await this.#serialize(async () => {
+      if (!active()) throw new Error('atlassian: connection cancelled')
+      if (expected && this.#value.tokens !== expected) return
+      const next: StoredSession = { ...this.#value, version: 1 }
+      for (const field of fields) if (field !== 'version') delete next[field]
       await this.#flush(next)
       this.#value = next
     })

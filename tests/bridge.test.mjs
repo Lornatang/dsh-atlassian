@@ -75,6 +75,105 @@ test('OAuth code with PKCE is exchanged and a saved session can refresh', async 
   } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
 })
 
+for (const { staleUnauthorizedDelay, clientSecretBasic } of [{ staleUnauthorizedDelay: 0, clientSecretBasic: false }, { staleUnauthorizedDelay: 300, clientSecretBasic: false }, { staleUnauthorizedDelay: 0, clientSecretBasic: true }]) {
+  test(`concurrent rotating refreshes keep credentials with delayed 401=${staleUnauthorizedDelay}, basic=${clientSecretBasic}`, async () => {
+    const mock = await startMockMcp({ oauth: true, rotateRefresh: true, refreshDelay: 100, staleUnauthorizedDelay, clientSecretBasic })
+    const root = await mkdtemp(join(tmpdir(), 'atlassian-rotating-refresh-'))
+    const file = join(root, 'session.json')
+    const tools = new Map()
+    const host = { logger, register(definition) { tools.set(definition.name, definition); return () => tools.delete(definition.name) } }
+    const bridge = new AtlassianBridge(host, { serverName: 'atlassian', url: mock.url, redirectPort: 0, toolCallTimeoutMs: 5000, expectedSite: '', authorizationTimeoutMs: 5000, autoOpenBrowser: false, store: new SessionStore(file) })
+    try {
+      await bridge.start()
+      await waitFor(() => bridge.snapshot().status === 'authorizing')
+      assert.equal((await fetch(bridge.snapshot().authorizationUrl)).status, 200)
+      await waitFor(() => bridge.snapshot().status === 'ready')
+      mock.expire()
+      const definition = tools.get('mcp__atlassian__getJiraIssue')
+      const results = await Promise.all([
+        definition.execute({ issueIdOrKey: 'DEMO-1' }, {}),
+        definition.execute({ issueIdOrKey: 'DEMO-1' }, {}),
+        bridge.callTool('getJiraIssue', { issueIdOrKey: 'DEMO-1' }),
+      ])
+      assert.equal(results.length, 3)
+      assert.equal(mock.refreshes(), 1)
+      const saved = JSON.parse(await readFile(file, 'utf8')).tokens
+      assert.equal(saved.access_token, 'refreshed-access-token')
+      assert.equal(saved.refresh_token, 'rotated-refresh-1')
+      assert.ok((await definition.execute({ issueIdOrKey: 'DEMO-1' }, {})).content.length)
+    } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+  })
+}
+
+test('disconnect cancels an in-flight refresh without recreating credentials', async () => {
+  const mock = await startMockMcp({ oauth: true, rotateRefresh: true, refreshDelay: 500 })
+  const root = await mkdtemp(join(tmpdir(), 'atlassian-refresh-disconnect-'))
+  const file = join(root, 'session.json')
+  const tools = new Map()
+  const host = { logger, register(definition) { tools.set(definition.name, definition); return () => tools.delete(definition.name) } }
+  const bridge = new AtlassianBridge(host, { serverName: 'atlassian', url: mock.url, redirectPort: 0, toolCallTimeoutMs: 5000, expectedSite: '', authorizationTimeoutMs: 5000, autoOpenBrowser: false, store: new SessionStore(file) })
+  try {
+    await bridge.start()
+    await waitFor(() => bridge.snapshot().status === 'authorizing')
+    await fetch(bridge.snapshot().authorizationUrl)
+    await waitFor(() => bridge.snapshot().status === 'ready')
+    mock.expire()
+    const request = tools.get('mcp__atlassian__getJiraIssue').execute({ issueIdOrKey: 'DEMO-1' }, {}).catch((error) => error)
+    await waitFor(() => mock.refreshes() === 1)
+    await bridge.disconnect()
+    await request
+    await delay(600)
+    await assert.rejects(stat(file), { code: 'ENOENT' })
+    assert.equal(bridge.snapshot().status, 'idle')
+  } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+for (const clientSecretBasic of [false, true]) test(`event-stream and tool requests share one rotating refresh with basic=${clientSecretBasic}`, async () => {
+  const mock = await startMockMcp({ oauth: true, rotateRefresh: true, refreshDelay: 300, serverEvents: true, clientSecretBasic })
+  const root = await mkdtemp(join(tmpdir(), 'atlassian-sse-refresh-'))
+  const file = join(root, 'session.json')
+  const tools = new Map()
+  const host = { logger, register(definition) { tools.set(definition.name, definition); return () => tools.delete(definition.name) } }
+  const bridge = new AtlassianBridge(host, { serverName: 'atlassian', url: mock.url, redirectPort: 0, toolCallTimeoutMs: 5000, expectedSite: '', authorizationTimeoutMs: 5000, autoOpenBrowser: false, store: new SessionStore(file) })
+  try {
+    await bridge.start()
+    await waitFor(() => bridge.snapshot().status === 'authorizing')
+    await fetch(bridge.snapshot().authorizationUrl)
+    await waitFor(() => bridge.snapshot().status === 'ready' && mock.streams() === 1)
+    mock.expire()
+    await waitFor(() => mock.refreshes() === 1)
+    const tool = tools.get('mcp__atlassian__getJiraIssue')
+    await Promise.all([tool.execute({ issueIdOrKey: 'DEMO-1' }, {}), bridge.callTool('getJiraIssue', { issueIdOrKey: 'DEMO-1' })])
+    assert.equal(mock.refreshes(), 1)
+    assert.equal(JSON.parse(await readFile(file, 'utf8')).tokens.refresh_token, 'rotated-refresh-1')
+    await waitFor(() => mock.streams() === 1)
+  } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('a terminal refresh error releases the refresh lock for a later retry', async () => {
+  const mock = await startMockMcp({ oauth: true, rotateRefresh: true, refreshErrorOnce: true })
+  const root = await mkdtemp(join(tmpdir(), 'atlassian-refresh-error-'))
+  const file = join(root, 'session.json')
+  const tools = new Map()
+  const host = { logger, register(definition) { tools.set(definition.name, definition); return () => tools.delete(definition.name) } }
+  const bridge = new AtlassianBridge(host, { serverName: 'atlassian', url: mock.url, redirectPort: 0, toolCallTimeoutMs: 3000, expectedSite: '', authorizationTimeoutMs: 5000, autoOpenBrowser: false, store: new SessionStore(file) })
+  try {
+    await bridge.start()
+    await waitFor(() => bridge.snapshot().status === 'authorizing')
+    await fetch(bridge.snapshot().authorizationUrl)
+    await waitFor(() => bridge.snapshot().status === 'ready')
+    mock.expire()
+    const tool = tools.get('mcp__atlassian__getJiraIssue')
+    await assert.rejects(tool.execute({ issueIdOrKey: 'DEMO-1' }, {}))
+    const retried = await Promise.race([
+      tool.execute({ issueIdOrKey: 'DEMO-1' }, {}),
+      delay(1500).then(() => { throw new Error('refresh retry remained blocked') }),
+    ])
+    assert.ok(retried.content.length)
+    assert.equal(mock.refreshes(), 2)
+  } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+})
+
 test('disconnect during startup cannot restore credentials or tools afterwards', async () => {
   const mock = await startMockMcp({ initializeDelay: 350 })
   const root = await mkdtemp(join(tmpdir(), 'atlassian-cancel-'))

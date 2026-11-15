@@ -12,6 +12,15 @@ import { startMockServer } from '../tests/mock-server.mjs'
 import { verifyBrowser } from './browser-smoke.mjs'
 
 const run = promisify(execFile)
+const runNpm = (args, options) => process.env.npm_execpath
+  ? run(process.execPath, [process.env.npm_execpath, ...args], options)
+  : run('npm', args, options)
+function packInfo(text) {
+  const output = JSON.parse(text)
+  const packed = Array.isArray(output) ? output[0] : Object.values(output)[0]
+  assert.ok(packed?.filename, 'npm pack did not return a package')
+  return packed
+}
 const root = fileURLToPath(new URL('..', import.meta.url))
 const temp = await mkdtemp(join(tmpdir(), 'atlassian-dsh-integration-'))
 const home = join(temp, 'home')
@@ -39,7 +48,7 @@ try {
   if (previous) {
     let oldSpec = previous
     if (previous === 'legacy-fixture') {
-      const packed = JSON.parse((await run('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', temp, join(root, 'tests', 'fixtures', 'legacy-plugin')], { cwd: root, env, timeout: 30000 })).stdout)[0]
+      const packed = packInfo((await runNpm(['pack', '--ignore-scripts', '--json', '--pack-destination', temp, join(root, 'tests', 'fixtures', 'legacy-plugin')], { cwd: root, env, timeout: 30000 })).stdout)
       oldSpec = join(temp, packed.filename)
     }
     await run(dsh, ['plugin', '--profile', 'bridge-test', 'add', oldSpec, '--registry=https://registry.npmjs.org/'], { env, cwd: temp, timeout: 240000, maxBuffer: 1024 * 1024 })
@@ -47,7 +56,7 @@ try {
   }
   let packageSpec = process.env.DSH_TEST_PACKAGE
   if (!packageSpec) {
-    const packed = JSON.parse((await run('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', temp], { cwd: root, env, timeout: 30000 })).stdout)[0]
+    const packed = packInfo((await runNpm(['pack', '--ignore-scripts', '--json', '--pack-destination', temp], { cwd: root, env, timeout: 30000 })).stdout)
     packageSpec = join(temp, packed.filename)
   }
   await run(dsh, ['plugin', '--profile', 'bridge-test', 'add', packageSpec, '--registry=https://registry.npmjs.org/'], { env, cwd: temp, timeout: 240000, maxBuffer: 1024 * 1024 })

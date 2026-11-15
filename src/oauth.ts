@@ -57,7 +57,7 @@ function isLoopback(url: URL): boolean {
   return ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
 }
 
-function secureUrl(url: URL, allowLoopbackHttp: boolean): void {
+export function secureUrl(url: URL, allowLoopbackHttp: boolean): void {
   if (url.username || url.password || (url.protocol !== 'https:' && !(allowLoopbackHttp && url.protocol === 'http:' && isLoopback(url)))) {
     throw new Error('Cloud and OAuth endpoints must use HTTPS without embedded credentials')
   }
@@ -172,36 +172,55 @@ export class AtlassianOAuthProvider implements OAuthClientProvider {
   readonly #redirect: () => string
   readonly #onUrl: (url: string) => void
   readonly #allowLoopbackHttp: boolean
+  readonly #active: () => boolean
+  readonly #tokenRead: (value: OAuthTokens | undefined) => void
+  readonly #refreshExpected: () => OAuthTokens | undefined
+  readonly #authFinished: () => void
 
-  constructor(options: { store: SessionStore; redirectUri: () => string; onAuthorizationUrl: (url: string) => void; allowLoopbackHttp: boolean; logger: Logger }) {
+  constructor(options: { store: SessionStore; redirectUri: () => string; onAuthorizationUrl: (url: string) => void; allowLoopbackHttp: boolean; logger: Logger; active?: () => boolean; tokenRead?: (tokens: OAuthTokens | undefined) => void; refreshExpected?: () => OAuthTokens | undefined; authFinished?: () => void }) {
     this.#store = options.store
     this.#redirect = options.redirectUri
     this.#onUrl = options.onAuthorizationUrl
     this.#allowLoopbackHttp = options.allowLoopbackHttp
+    this.#active = options.active ?? (() => true)
+    this.#tokenRead = options.tokenRead ?? (() => undefined)
+    this.#refreshExpected = options.refreshExpected ?? (() => undefined)
+    this.#authFinished = options.authFinished ?? (() => undefined)
   }
-  get redirectUrl(): string { return this.#redirect() }
+  #check(): void { if (!this.#active()) throw new Error('atlassian: connection cancelled') }
+  get redirectUrl(): string { this.#check(); return this.#redirect() }
   get clientMetadata(): OAuthClientMetadata {
     return { client_name: 'DSH Atlassian', redirect_uris: [this.redirectUrl], grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], token_endpoint_auth_method: 'none' }
   }
-  state(): string { return randomBytes(16).toString('hex') }
-  clientInformation(): OAuthClientInformationMixed | undefined { return this.#store.current.clientInformation }
-  async saveClientInformation(value: OAuthClientInformationMixed): Promise<void> { await this.#store.patch({ clientInformation: value }) }
-  tokens(): OAuthTokens | undefined { return this.#store.current.tokens }
-  async saveTokens(value: OAuthTokens): Promise<void> { await this.#store.patch({ tokens: value }) }
+  state(): string { this.#check(); return randomBytes(16).toString('hex') }
+  clientInformation(): OAuthClientInformationMixed | undefined { this.#check(); return this.#store.current.clientInformation }
+  async saveClientInformation(value: OAuthClientInformationMixed): Promise<void> { await this.#store.patch({ clientInformation: value }, this.#active) }
+  tokens(): OAuthTokens | undefined { this.#check(); const value = this.#store.current.tokens; this.#tokenRead(value); return value }
+  async saveTokens(value: OAuthTokens): Promise<void> {
+    try { await this.#store.saveTokens(value, this.#active, this.#refreshExpected()) } finally { this.#authFinished() }
+  }
   redirectToAuthorization(url: URL): void {
+    this.#check()
     secureUrl(url, this.#allowLoopbackHttp)
     this.#onUrl(url.href)
+    this.#authFinished()
   }
-  async saveCodeVerifier(value: string): Promise<void> { await this.#store.patch({ codeVerifier: value }) }
+  async saveCodeVerifier(value: string): Promise<void> {
+    try { await this.#store.patch({ codeVerifier: value }, this.#active) } finally { this.#authFinished() }
+  }
   codeVerifier(): string {
+    this.#check()
     const value = this.#store.current.codeVerifier
     if (!value) throw new Error('missing PKCE verifier')
     return value
   }
   async invalidateCredentials(scope: 'all' | 'client' | 'tokens' | 'verifier' | 'discovery'): Promise<void> {
-    if (scope === 'all') await this.#store.clear('tokens', 'clientInformation', 'codeVerifier')
-    else if (scope === 'client') await this.#store.clear('clientInformation')
-    else if (scope === 'tokens') await this.#store.clear('tokens')
-    else if (scope === 'verifier') await this.#store.clear('codeVerifier')
+    try {
+      const expected = this.#refreshExpected()
+      if (scope === 'all') await this.#store.clearCredentialsIf(this.#active, expected, 'tokens', 'clientInformation', 'codeVerifier')
+      else if (scope === 'client') await this.#store.clearCredentialsIf(this.#active, expected, 'clientInformation')
+      else if (scope === 'tokens') await this.#store.clearCredentialsIf(this.#active, expected, 'tokens')
+      else if (scope === 'verifier') await this.#store.clearCredentialsIf(this.#active, undefined, 'codeVerifier')
+    } finally { this.#authFinished() }
   }
 }

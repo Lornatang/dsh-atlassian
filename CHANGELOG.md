@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.8 - 2026-11-15
+
+- Serialize rotating OAuth refreshes across concurrent MCP requests, preserve newer credentials after delayed responses, and cancel refreshes on disconnect.
+- Include a GitHub release archive; npm is not published for this release.
+
 ## 0.1.7 - 2026-11-15
 
 - Rewrite the README to the package-bundle documentation convention and add a

@@ -11,6 +11,7 @@ export interface AuthorizationCallback {
     code: string;
     state: string | undefined;
 }
+export declare function secureUrl(url: URL, allowLoopbackHttp: boolean): void;
 /** Restrict every discovered OAuth and MCP endpoint, including redirect targets. */
 export declare function createCloudFetch(serverUrl: URL): {
     fetch: FetchLike;
@@ -32,6 +33,10 @@ export declare class AtlassianOAuthProvider implements OAuthClientProvider {
         onAuthorizationUrl: (url: string) => void;
         allowLoopbackHttp: boolean;
         logger: Logger;
+        active?: () => boolean;
+        tokenRead?: (tokens: OAuthTokens | undefined) => void;
+        refreshExpected?: () => OAuthTokens | undefined;
+        authFinished?: () => void;
     });
     get redirectUrl(): string;
     get clientMetadata(): OAuthClientMetadata;
