@@ -1,7 +1,7 @@
 import { createServer } from 'node:http'
 import { createHash } from 'node:crypto'
 
-export async function startMockMcp({ initializeDelay = 0, oauth = false, tokenEndpoint, rotateRefresh = false, refreshDelay = 0, staleUnauthorizedDelay = 0, refreshErrorOnce = false, dropRefreshResponse = false, clientSecretBasic = false, serverEvents = false, strictRedirect = false } = {}) {
+export async function startMockMcp({ initializeDelay = 0, resourceDelay = 0, oauth = false, tokenEndpoint, rotateRefresh = false, refreshDelay = 0, staleUnauthorizedDelay = 0, refreshErrorOnce = false, dropRefreshResponse = false, clientSecretBasic = false, serverEvents = false, strictRedirect = false } = {}) {
   const calls = []
   let origin
   let challenge
@@ -87,7 +87,10 @@ export async function startMockMcp({ initializeDelay = 0, oauth = false, tokenEn
     } else if (message.method === 'tools/list') result = { tools: definitions }
     else if (message.method === 'tools/call') {
       let value
-      if (message.params.name === 'getAccessibleAtlassianResources') value = [{ id: 'mock-cloud-id', url: 'https://example.atlassian.net', name: 'Example' }]
+      if (message.params.name === 'getAccessibleAtlassianResources') {
+        if (resourceDelay) await new Promise((resolve) => setTimeout(resolve, resourceDelay))
+        value = [{ id: 'mock-cloud-id', url: 'https://example.atlassian.net', name: 'Example' }]
+      }
       else if (message.params.name === 'searchJiraIssuesUsingJql') value = { issues: [{ id: '1', key: 'DEMO-1', fields: { summary: 'Mock issue', project: { key: 'DEMO', name: 'Demo' }, status: { name: 'To Do', statusCategory: { key: 'new', name: 'To Do' } } } }], isLast: true }
       else value = { key: 'DEMO-1', fields: { summary: 'Mock issue' } }
       result = { content: [{ type: 'text', text: JSON.stringify(value) }] }

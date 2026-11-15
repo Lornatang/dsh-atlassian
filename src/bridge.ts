@@ -254,7 +254,7 @@ export class AtlassianBridge {
       check()
       this.#status = 'connecting'
       this.#error = undefined
-      const client = new Client({ name: 'dsh-atlassian', version: '0.1.9' })
+      const client = new Client({ name: 'dsh-atlassian', version: '0.1.10' })
       client.onerror = () => { this.#operation.getStore()?.releaseRefresh?.() }
       const transport = new StreamableHTTPClientTransport(new URL(this.#options.url), { authProvider: this.#provider, fetch: this.#fetch })
       const send = transport.send.bind(transport)
@@ -263,6 +263,10 @@ export class AtlassianBridge {
         return this.#operation.run(operation, async () => {
           try { return await send(message, options) } catch (error) {
             operation.releaseRefresh?.()
+            if (!this.#disposed && operation.generation === this.#generation && this.#status === 'ready' && operation.observedTokens && !this.#options.store.current.tokens) {
+              this.#status = 'error'
+              this.#error = 'Atlassian authorization expired; reconnect to authorize again'
+            }
             if (!(error instanceof RedirectRegistrationChanged)) throw error
             operation.observedTokens = undefined
             operation.refreshExpected = undefined
@@ -289,7 +293,7 @@ export class AtlassianBridge {
       this.#client = client
       await this.#registerTools(client)
       check()
-      await this.#readSite(client)
+      await this.#readSite(client, generation, this.#controller.signal)
       check()
       this.#url = undefined
       this.#status = 'ready'
@@ -338,15 +342,15 @@ export class AtlassianBridge {
     } catch (error) { this.#clearTools(); throw error }
   }
 
-  async #readSite(client: Client): Promise<void> {
+  async #readSite(client: Client, generation: number, signal: AbortSignal): Promise<void> {
     const name = this.rawNameMatching(/accessibleatlassianresources/i)
     if (!name) return
     try {
-      const result = await client.callTool({ name, arguments: {} }, undefined, { timeout: 20000 })
+      const result = await client.callTool({ name, arguments: {} }, undefined, { timeout: 20000, signal })
       const items: unknown = JSON.parse(display(result.content))
       const first = Array.isArray(items) ? items[0] : items
       if (first && typeof first === 'object' && typeof (first as Record<string, unknown>)['url'] === 'string') {
-        await this.#options.store.patch({ site: new URL((first as Record<string, string>)['url']!).host }, () => !this.#disposed, undefined, undefined, this.#controller.signal)
+        await this.#options.store.patch({ site: new URL((first as Record<string, string>)['url']!).host }, () => !this.#disposed && generation === this.#generation && !signal.aborted, undefined, undefined, signal)
       }
     } catch { /* The connection can work without a site label. */ }
   }

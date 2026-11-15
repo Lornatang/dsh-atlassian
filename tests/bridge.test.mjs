@@ -163,6 +163,12 @@ test('a lost refresh response is not retried with a possibly rotated token', asy
     await assert.rejects(child.send('call'))
     assert.equal(mock.refreshes(), 1)
     assert.equal(JSON.parse(await readFile(file, 'utf8')).tokens, undefined)
+    assert.equal(bridge.snapshot().status, 'error')
+    await bridge.authorize()
+    await waitFor(() => bridge.snapshot().status === 'authorizing')
+    assert.equal((await fetch(bridge.snapshot().authorizationUrl)).status, 200)
+    await waitFor(() => bridge.snapshot().status === 'ready')
+    await bridge.callTool('getJiraIssue', { issueIdOrKey: 'DEMO-1' })
   } finally {
     if (child) { await child.send('dispose').catch(() => {}); await child.kill() }
     await bridge.dispose()
@@ -258,6 +264,26 @@ test('a second store in the same process cannot release another store’s cross-
     if (childError) throw childError
     assert.equal(childAcquired, true)
   } finally { abort.abort(); lease?.release(); await child.kill(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('disposal interrupts a site update waiting for another process', async () => {
+  const mock = await startMockMcp({ resourceDelay: 400 })
+  const root = await mkdtemp(join(tmpdir(), 'atlassian-process-site-'))
+  const file = join(root, 'session.json')
+  const bridge = new AtlassianBridge({ logger, register() { return () => {} } }, {
+    serverName: 'atlassian', url: mock.url, redirectPort: 0, toolCallTimeoutMs: 5000,
+    expectedSite: '', authorizationTimeoutMs: 5000, autoOpenBrowser: false, store: new SessionStore(file),
+  })
+  const child = childBridge(mock.url, file, 0)
+  let boot
+  try {
+    boot = bridge.start()
+    await waitFor(() => mock.calls.some((call) => call.method === 'tools/call' && call.params.name === 'getAccessibleAtlassianResources'))
+    await child.send('hold')
+    await delay(450)
+    await Promise.race([bridge.dispose(), delay(500).then(() => { throw new Error('disposal waited for another process') })])
+    await boot
+  } finally { await child.kill(); await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
 })
 
 test('connects to MCP, registers usable tools and loads a Jira board', async () => {
