@@ -4,6 +4,7 @@ import { SessionStore } from '../../lib/store.js'
 const [url, file, port] = process.argv.slice(2)
 const logger = { info() {}, warn() {}, error() {} }
 const store = new SessionStore(file)
+let held
 const bridge = new AtlassianBridge({ logger, register() { return () => {} } }, {
   serverName: 'atlassian', url, redirectPort: Number(port), toolCallTimeoutMs: 5000,
   expectedSite: '', authorizationTimeoutMs: 5000, autoOpenBrowser: false, store,
@@ -23,9 +24,10 @@ process.on('message', async ({ id, command }) => {
       result = bridge.snapshot()
     } else if (command === 'dispose') {
       await bridge.dispose()
+      held?.release()
       result = true
     } else if (command === 'hold') {
-      await store.acquire()
+      held = await store.acquire()
       result = true
     } else if (command === 'patch') {
       await store.patch({ codeVerifier: 'child-verifier' })

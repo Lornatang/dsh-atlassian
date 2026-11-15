@@ -36,7 +36,13 @@ function childBridge(url, file, port) {
     send(command) {
       return new Promise((resolve, reject) => { const id = ++next; pending.set(id, { resolve, reject }); child.send({ id, command }) })
     },
-    kill() { child.kill() },
+    kill() {
+      return new Promise((resolve) => {
+        if (child.exitCode !== null || child.signalCode !== null) { resolve(); return }
+        child.once('exit', resolve)
+        child.kill()
+      })
+    },
   }
 }
 
@@ -65,7 +71,7 @@ for (const staleUnauthorizedDelay of [0, 300]) test(`independent processes share
     assert.equal(JSON.parse(await readFile(file, 'utf8')).tokens.refresh_token, 'rotated-refresh-1')
     await child.send('call')
   } finally {
-    if (child) { await child.send('dispose').catch(() => {}); child.kill() }
+    if (child) { await child.send('dispose').catch(() => {}); await child.kill() }
     await bridge.dispose()
     await mock.close()
     await rm(root, { recursive: true, force: true })
@@ -95,7 +101,7 @@ test('a stale process cannot restore credentials after another disconnects', asy
     await assert.rejects(stat(file), { code: 'ENOENT' })
     assert.equal(mock.refreshes(), 0)
   } finally {
-    if (child) { await child.send('dispose').catch(() => {}); child.kill() }
+    if (child) { await child.send('dispose').catch(() => {}); await child.kill() }
     await bridge.dispose()
     await mock.close()
     await rm(root, { recursive: true, force: true })
@@ -128,7 +134,7 @@ test('disposing a process waits for its already-sent refresh before another refr
     assert.equal(mock.refreshes(), 1)
     assert.equal(JSON.parse(await readFile(file, 'utf8')).tokens.refresh_token, 'rotated-refresh-1')
   } finally {
-    if (child) { await child.send('dispose').catch(() => {}); child.kill() }
+    if (child) { await child.send('dispose').catch(() => {}); await child.kill() }
     await bridge.dispose()
     await mock.close()
     await rm(root, { recursive: true, force: true })
@@ -158,7 +164,7 @@ test('a lost refresh response is not retried with a possibly rotated token', asy
     assert.equal(mock.refreshes(), 1)
     assert.equal(JSON.parse(await readFile(file, 'utf8')).tokens, undefined)
   } finally {
-    if (child) { await child.send('dispose').catch(() => {}); child.kill() }
+    if (child) { await child.send('dispose').catch(() => {}); await child.kill() }
     await bridge.dispose()
     await mock.close()
     await rm(root, { recursive: true, force: true })
@@ -196,7 +202,7 @@ test('a fallback callback port re-registers before interactive reauthorization',
     assert.equal((await child.send('snapshot')).status, 'ready')
     await child.send('call')
   } finally {
-    if (child) { await child.send('dispose').catch(() => {}); child.kill() }
+    if (child) { await child.send('dispose').catch(() => {}); await child.kill() }
     await bridge.dispose()
     await mock.close()
     await rm(root, { recursive: true, force: true })
@@ -221,10 +227,37 @@ test('session writes merge across processes and a crashed lock holder is release
     await assert.rejects(cancelled, /cancelled/)
     const waiting = store.patch({ site: 'after-crash.test' })
     await delay(50)
-    child.kill()
+    await child.kill()
     await waiting
     assert.equal(JSON.parse(await readFile(file, 'utf8')).site, 'after-crash.test')
-  } finally { child.kill(); await rm(root, { recursive: true, force: true }) }
+  } finally { await child.kill(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('a second store in the same process cannot release another store’s cross-process lock', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'atlassian-process-lock-'))
+  const file = join(root, 'session.json')
+  const first = new SessionStore(file)
+  const second = new SessionStore(file)
+  const child = childBridge('http://127.0.0.1:1/mcp', file, 0)
+  const abort = new AbortController()
+  let lease
+  try {
+    lease = await first.acquire()
+    const waiting = second.acquire(abort.signal).then(() => undefined, (error) => error)
+    await delay(75)
+    let childAcquired = false
+    let childError
+    const childWaiting = child.send('hold').then(() => { childAcquired = true }, (error) => { childError = error })
+    await delay(150)
+    assert.equal(childAcquired, false)
+    abort.abort()
+    assert.match(String(await waiting), /cancelled/)
+    lease.release()
+    lease = undefined
+    await childWaiting
+    if (childError) throw childError
+    assert.equal(childAcquired, true)
+  } finally { abort.abort(); lease?.release(); await child.kill(); await rm(root, { recursive: true, force: true }) }
 })
 
 test('connects to MCP, registers usable tools and loads a Jira board', async () => {
