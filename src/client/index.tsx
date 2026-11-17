@@ -56,14 +56,48 @@ async function api<T>(path: string, method: 'GET' | 'POST' = 'GET', body?: unkno
   if (!response.ok || value['ok'] === false) throw new Error(typeof value['error'] === 'string' ? value['error'] : `HTTP ${String(response.status)}`)
   return value as T
 }
+interface SnapshotState { value?: Snapshot; error: string }
+// Settings and the board panel share one poller and one snapshot, so an idle
+// workspace neither doubles the /status traffic nor re-renders unchanged data.
+const snapshotState: SnapshotState = { value: undefined, error: '' }
+const snapshotListeners = new Set<() => void>()
+let snapshotTimer: number | undefined
+let snapshotInflight: Promise<void> | undefined
+let snapshotSerialized = ''
+async function refreshSnapshot(): Promise<void> {
+  if (snapshotInflight) return snapshotInflight
+  snapshotInflight = (async () => {
+    let next: SnapshotState
+    try { next = { value: await api<Snapshot>('/status'), error: '' } }
+    catch (err) { next = { value: snapshotState.value, error: err instanceof Error ? err.message : String(err) } }
+    const serialized = JSON.stringify(next)
+    if (serialized === snapshotSerialized) return
+    snapshotSerialized = serialized
+    snapshotState.value = next.value
+    snapshotState.error = next.error
+    for (const listener of [...snapshotListeners]) listener()
+  })().finally(() => { snapshotInflight = undefined })
+  return snapshotInflight
+}
+function subscribeSnapshot(listener: () => void): () => void {
+  snapshotListeners.add(listener)
+  if (snapshotTimer === undefined) {
+    snapshotTimer = window.setInterval(() => { void refreshSnapshot() }, 5000)
+    void refreshSnapshot()
+  }
+  return () => {
+    snapshotListeners.delete(listener)
+    if (!snapshotListeners.size && snapshotTimer !== undefined) { window.clearInterval(snapshotTimer); snapshotTimer = undefined }
+  }
+}
 function useSnapshot(): { value?: Snapshot; error: string; refresh: () => Promise<void> } {
-  const [value, setValue] = React.useState<Snapshot>()
-  const [error, setError] = React.useState('')
-  const refresh = React.useCallback(async () => {
-    try { setValue(await api<Snapshot>('/status')); setError('') } catch (err) { setError(err instanceof Error ? err.message : String(err)) }
+  const [state, setState] = React.useState<SnapshotState>({ value: snapshotState.value, error: snapshotState.error })
+  React.useEffect(() => {
+    const update = (): void => setState({ value: snapshotState.value, error: snapshotState.error })
+    update()
+    return subscribeSnapshot(update)
   }, [])
-  React.useEffect(() => { void refresh(); const timer = window.setInterval(() => { void refresh() }, 5000); return () => window.clearInterval(timer) }, [refresh])
-  return { value, error, refresh }
+  return { value: state.value, error: state.error, refresh: refreshSnapshot }
 }
 function icon(name: 'link' | 'check' | 'alert' | 'arrow' | 'refresh' | 'external' | 'close'): React.ReactElement {
   const paths: Record<typeof name, string> = {
@@ -169,7 +203,7 @@ export function AtlassianSettings(): React.ReactElement {
 
 function promptFor(issues: Issue[], template: string): string {
   return issues.map((item) => template
-    ? template.replaceAll('{{key}}', item.key).replaceAll('{{summary}}', item.summary)
+    ? template.replaceAll('{{key}}', () => item.key).replaceAll('{{summary}}', () => item.summary)
     : `Work on Jira issue ${item.key}: ${item.summary}. Check the requirements and relevant code first, then report changes and verification. Do not change the Jira status automatically.`).join('\n\n')
 }
 

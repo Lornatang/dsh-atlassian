@@ -5,6 +5,8 @@ export interface ToolBridge {
         status: string;
         error?: string | undefined;
     };
+    /** Changes whenever the connection is replaced, so cached site data can be invalidated. */
+    epoch?(): number;
 }
 export interface BoardStatus {
     name: string;

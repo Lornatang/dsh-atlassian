@@ -2,6 +2,8 @@ export interface ToolBridge {
   rawNameMatching(pattern: RegExp): string | undefined
   callTool(name: string, args: Record<string, unknown>, timeoutMs?: number): Promise<readonly unknown[]>
   snapshot?(): { status: string; error?: string | undefined }
+  /** Changes whenever the connection is replaced, so cached site data can be invalidated. */
+  epoch?(): number
 }
 export interface BoardStatus { name: string; categoryKey: string; categoryName: string; colorName: string }
 export interface BoardIssue {
@@ -35,16 +37,17 @@ function issue(value: unknown, base?: string): BoardIssue | undefined {
 
 export class JiraBoard {
   readonly #bridge: ToolBridge
-  #resource?: { id: string; base: string; site: string }
+  #resource?: { epoch: number; id: string; base: string; site: string }
+  #pending?: { epoch: number; promise: Promise<string> }
   constructor(bridge: ToolBridge) { this.#bridge = bridge }
   available(): boolean { return !!this.#bridge.rawNameMatching(/searchJiraIssuesUsingJql/i) }
-  get site(): string | undefined { return this.#resource?.site }
+  get site(): string | undefined { return this.#resource?.epoch === (this.#bridge.epoch?.() ?? 0) ? this.#resource.site : undefined }
 
   async #call(pattern: RegExp, args: Record<string, unknown>, timeoutMs?: number): Promise<unknown> {
     const name = this.#bridge.rawNameMatching(pattern)
     if (!name) {
       const state = this.#bridge.snapshot?.()
-      if (state && state.status !== 'ready') throw new BoardError('not-connected', state.error || `Atlassian is not connected（${state.status}）`)
+      if (state && state.status !== 'ready') throw new BoardError('not-connected', state.error || `Atlassian is not connected (${state.status})`)
       throw new BoardError('missing-tool', `Missing Jira tool: ${pattern.source}`)
     }
     let blocks: readonly unknown[]
@@ -55,7 +58,15 @@ export class JiraBoard {
   }
 
   async cloudId(): Promise<string> {
-    if (this.#resource) return this.#resource.id
+    const epoch = this.#bridge.epoch?.() ?? 0
+    if (this.#resource?.epoch === epoch) return this.#resource.id
+    if (this.#pending?.epoch === epoch) return this.#pending.promise
+    const promise = this.#resolveSite(epoch)
+    this.#pending = { epoch, promise }
+    try { return await promise } finally { if (this.#pending?.promise === promise) this.#pending = undefined }
+  }
+
+  async #resolveSite(epoch: number): Promise<string> {
     const data = await this.#call(/accessibleatlassianresources/i, {}, 20000)
     const list = Array.isArray(data) ? data : [data]
     for (const item of list) {
@@ -64,7 +75,8 @@ export class JiraBoard {
       try {
         const parsed = new URL(url)
         if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) continue
-        this.#resource = { id, base: `${parsed.origin}${parsed.pathname.replace(/\/$/, '')}`, site: parsed.host }
+        // A reconnect may have invalidated this resolution while it was in flight.
+        if ((this.#bridge.epoch?.() ?? 0) === epoch) this.#resource = { epoch, id, base: `${parsed.origin}${parsed.pathname.replace(/\/$/, '')}`, site: parsed.host }
         return id
       } catch { continue }
     }

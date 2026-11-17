@@ -62,6 +62,7 @@ export class ServerBridge {
   #operations = new Map<string, Operation>()
   #disposers: Array<() => void> = []
   #controllers = new Set<AbortController>()
+  #http = new Set<ServerHttp>()
   #status: BridgeSnapshot['status'] = 'idle'
   #error: string | undefined
   #disposed = false
@@ -92,6 +93,7 @@ export class ServerBridge {
 
   rawNames(): readonly string[] { return [...this.#operations.keys()] }
   rawNameMatching(pattern: RegExp): string | undefined { return this.rawNames().find((name) => pattern.test(name)) }
+  epoch(): number { return this.#generation }
 
   async start(): Promise<void> {
     if (this.#starting) return this.#starting
@@ -139,31 +141,40 @@ export class ServerBridge {
     if (confluenceUrl && !next.confluence) throw new Error('Enter Confluence credentials')
     const jira = jiraUrl && next.jira ? new ServerHttp(jiraUrl, next.jira, jiraCaFile, allowInsecureHttp) : undefined
     const confluence = confluenceUrl && next.confluence ? new ServerHttp(confluenceUrl, next.confluence, confluenceCaFile, allowInsecureHttp) : undefined
-    if (jira) {
-      const me = record(await this.#request(jira, 'GET', '/rest/api/2/myself'), 'Jira login response')
-      if (typeof me['name'] !== 'string' && typeof me['key'] !== 'string') throw new Error('Jira did not return an authenticated user')
-      current()
-    }
-    if (confluence) {
-      const me = record(await this.#request(confluence, 'GET', '/rest/api/user/current'), 'Confluence login response')
-      if (typeof me['username'] !== 'string' && typeof me['userKey'] !== 'string') throw new Error('Confluence did not return an authenticated user')
-      current()
-    }
-    await this.#store.patch({ serverCredentials: next })
-    current()
-    const operations = this.#makeOperations(jira, confluence)
-    this.#clearTools()
-    const disposers: Array<() => void> = []
+    const clients = [jira, confluence].filter((client): client is ServerHttp => !!client)
     try {
-      for (const [rawName, op] of operations) disposers.push(this.#host.register(this.#definition(rawName, op)))
+      if (jira) {
+        const me = record(await this.#request(jira, 'GET', '/rest/api/2/myself'), 'Jira login response')
+        if (typeof me['name'] !== 'string' && typeof me['key'] !== 'string') throw new Error('Jira did not return an authenticated user')
+        current()
+      }
+      if (confluence) {
+        const me = record(await this.#request(confluence, 'GET', '/rest/api/user/current'), 'Confluence login response')
+        if (typeof me['username'] !== 'string' && typeof me['userKey'] !== 'string') throw new Error('Confluence did not return an authenticated user')
+        current()
+      }
+      await this.#store.patch({ serverCredentials: next })
+      current()
+      const operations = this.#makeOperations(jira, confluence)
+      this.#clearTools()
+      const disposers: Array<() => void> = []
+      try {
+        for (const [rawName, op] of operations) disposers.push(this.#host.register(this.#definition(rawName, op)))
+      } catch (error) {
+        for (const dispose of disposers) dispose()
+        throw error
+      }
+      this.#credentials = next
+      this.#operations = operations
+      this.#disposers = disposers
+      this.#status = 'ready'
     } catch (error) {
-      for (const dispose of disposers) dispose()
+      for (const client of clients) client.close()
       throw error
     }
-    this.#credentials = next
-    this.#operations = operations
-    this.#disposers = disposers
-    this.#status = 'ready'
+    // The replacement connection is live; release the previous pooled sockets.
+    for (const client of this.#http) client.close()
+    this.#http = new Set(clients)
   }
 
   async disconnect(): Promise<BridgeSnapshot> {
@@ -173,6 +184,7 @@ export class ServerBridge {
     await this.#starting?.catch(() => undefined)
     await this.#running
     this.#clearTools()
+    this.#closeHttp()
     await this.#store.destroy()
     this.#credentials = {}
     this.#status = 'idle'
@@ -189,6 +201,7 @@ export class ServerBridge {
     await this.#starting?.catch(() => undefined)
     await this.#running
     this.#clearTools()
+    this.#closeHttp()
   }
 
   async callTool(rawName: string, args: Args, timeoutMs?: number): Promise<readonly unknown[]> {
@@ -202,6 +215,8 @@ export class ServerBridge {
     this.#disposers = []
     this.#operations = new Map()
   }
+
+  #closeHttp(): void { for (const client of this.#http) client.close(); this.#http.clear() }
 
   #definition(rawName: string, op: Operation): ToolDefinition {
     const definition = {

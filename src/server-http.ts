@@ -11,6 +11,7 @@ export class ServerHttp {
   readonly #base: URL
   readonly #credential: ServerCredential
   readonly #ca: readonly string[] | undefined
+  readonly #agent: http.Agent | https.Agent
 
   constructor(base: string, credential: ServerCredential, caFile: string, allowInsecureHttp: boolean) {
     let url: URL
@@ -27,7 +28,16 @@ export class ServerHttp {
     this.#base = url
     this.#credential = credential
     this.#ca = caFile ? [...rootCertificates, readFileSync(caFile, 'utf8')] : undefined
+    // Reuse connections across REST calls instead of a TCP/TLS handshake per request.
+    // Explicitly supplied trust anchors may be intermediates or a pinned
+    // self-signed server certificate. Keep hostname and TLS checks enabled.
+    this.#agent = url.protocol === 'https:'
+      ? new https.Agent({ keepAlive: true, maxSockets: 8, ...(this.#ca ? { ca: [...this.#ca], allowPartialTrustChain: true } : {}) })
+      : new http.Agent({ keepAlive: true, maxSockets: 8 })
   }
+
+  /** Release pooled sockets when the connection is replaced or torn down. */
+  close(): void { this.#agent.destroy() }
 
   get baseUrl(): string { return this.#base.href.replace(/\/$/, '') }
 
@@ -52,10 +62,7 @@ export class ServerHttp {
       const transport = target.protocol === 'https:' ? https : http
       const req = transport.request(target, {
         method,
-        agent: false,
-        // Explicitly supplied trust anchors may be intermediates or a pinned
-        // self-signed server certificate. Keep hostname and TLS checks enabled.
-        ...(target.protocol === 'https:' && this.#ca ? { ca: [...this.#ca], allowPartialTrustChain: true } : {}),
+        agent: this.#agent,
         headers: {
           accept: 'application/json',
           authorization,

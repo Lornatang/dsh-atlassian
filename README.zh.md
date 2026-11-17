@@ -34,7 +34,7 @@ dsh plugin --profile <name> add @lornatang/dsh-atlassian
 dsh plugin --profile <name> remove @lornatang/dsh-atlassian
 ```
 
-安装仅发布到 GitHub 的 0.1.10 版本，请运行 `dsh plugin --profile <name> add https://github.com/Lornatang/dsh-atlassian/releases/download/v0.1.10/lornatang-dsh-atlassian-0.1.10.tgz`。npm 仓库中的版本可能较旧。
+安装仅发布到 GitHub 的 0.1.11 版本，请运行 `dsh plugin --profile <name> add https://github.com/Lornatang/dsh-atlassian/releases/download/v0.1.11/lornatang-dsh-atlassian-0.1.11.tgz`。npm 仓库中的版本可能较旧。
 
 `add` 会把本层组合进 profile：profile 的 `cordis.patch.yml` 会增加一条 insert 记录，行 id 为 `atlassian`，包名为 `@lornatang/dsh-atlassian`，并带上随包提供的补丁中的五个值——`mode: cloud`、`serverName: atlassian`、`url: https://mcp.atlassian.com/v1/mcp`、`redirectPort: 3334` 与 `autoOpenBrowser: true`。包的 manifest 声明了 `dsh.bundle.patch: ./cordis.patch.yml`，reconcile 步骤读取的正是这条声明；`remove` 会再次删除该记录。两条命令执行后都要重启 DSH，因为 profile 只在启动时组合自己的行与客户端部分，随后打开 Settings → Atlassian。0.1.5 之前的版本以 `@lornatang/dsh-atlassian-bridge` 发布；添加带作用域的新名称、从同一 profile 删除旧包、重启一次即可——行、其设置与已保存的凭据都会保留。
 

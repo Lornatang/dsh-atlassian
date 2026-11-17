@@ -48,8 +48,28 @@ test('Cloud fetch bounds decoded responses and individual SSE events', async () 
   const large = 'x'.repeat(limit + 1)
   const event = `data: ${'x'.repeat(6 * 1024 * 1024)}\r\n\r\n`
   const manyEvents = `data: ${'x'.repeat(1024)}\n\n`.repeat(11000)
-  const server = createServer((req, res) => {
-    if (req.url === '/compressed') {
+  const server = createServer(async (req, res) => {
+    res.on('error', () => {})
+    if (req.url === '/split-events') {
+      req.socket.setNoDelay(true)
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      for (const part of ['data: one\r', '\n\r', '\ndata: two\r', '\r\n', 'data: three\n', '\n']) {
+        res.write(part)
+        await new Promise((resolve) => setTimeout(resolve, 5))
+      }
+      res.end()
+    } else if (req.url === '/cr-events') {
+      res.writeHead(200, { 'content-type': 'text/event-stream' }).end('data: cr\r\rdata: next\r\r')
+    } else if (req.url === '/split-large') {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.write('data: ')
+      const block = 'x'.repeat(1024 * 1024)
+      for (let i = 0; i < 11 && !res.destroyed; i++) {
+        res.write(block)
+        await new Promise((resolve) => setTimeout(resolve, 2))
+      }
+      if (!res.destroyed) res.end('\n\n')
+    } else if (req.url === '/compressed') {
       res.writeHead(200, { 'content-encoding': 'gzip', 'content-type': 'application/json' }).end(gzipSync(large))
     } else if (req.url === '/error') {
       res.writeHead(500, { 'content-type': 'text/event-stream' }).end(manyEvents)
@@ -80,6 +100,13 @@ test('Cloud fetch bounds decoded responses and individual SSE events', async () 
     // server incorrectly labels its body as an event stream.
     const mislabeled = await network.fetch(`${base}/events`)
     await assert.rejects(mislabeled.text(), /response exceeded the size limit/)
+    // CR/LF/CRLF separators split across network chunks must keep their meaning.
+    const split = await network.fetch(`${base}/split-events`, { headers: { accept: 'text/event-stream' } })
+    assert.equal(await split.text(), 'data: one\r\n\r\ndata: two\r\r\ndata: three\n\n')
+    const crOnly = await network.fetch(`${base}/cr-events`, { headers: { accept: 'text/event-stream' } })
+    assert.equal(await crOnly.text(), 'data: cr\r\rdata: next\r\r')
+    const splitLarge = await network.fetch(`${base}/split-large`, { headers: { accept: 'text/event-stream' } })
+    await assert.rejects(splitLarge.text(), /event exceeded the size limit/)
   } finally { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)) }
 })
 
@@ -170,5 +197,54 @@ test('HTTP routes fail closed until the DSH connection fence is available', asyn
     assert.equal((await fetch(url)).status, 200)
     assert.equal((await fetch(url.replace('/status', '/configure'), { method: 'POST', body: '{}' })).status, 200)
     assert.equal(updates, 1)
+  } finally { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)) }
+})
+
+test('a board re-resolves its site after the bridge epoch changes and dedups concurrent lookups', async () => {
+  let epoch = 1
+  let lookups = 0
+  const bridge = {
+    epoch: () => epoch,
+    rawNameMatching: () => 'getAccessibleAtlassianResources',
+    callTool: async () => {
+      lookups++
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      return [{ type: 'text', text: JSON.stringify([{ id: `cloud-${epoch}`, url: `https://site-${epoch}.atlassian.net` }]) }]
+    },
+  }
+  const board = new JiraBoard(bridge)
+  assert.equal(await board.cloudId(), 'cloud-1')
+  assert.equal(board.site, 'site-1.atlassian.net')
+  epoch = 2
+  assert.equal(board.site, undefined, 'a stale epoch must not expose the old site')
+  const [first, second] = await Promise.all([board.cloudId(), board.cloudId()])
+  assert.equal(first, 'cloud-2')
+  assert.equal(second, 'cloud-2')
+  assert.equal(lookups, 2, 'concurrent lookups share one resolution')
+})
+
+test('HTTP routes reject malformed encodings instead of failing with a server error', async () => {
+  let handler
+  let boardCalls = 0
+  const web = { register(route) { handler = route.handler; return () => {} } }
+  const bridge = { snapshot: () => ({ status: 'ready', siteMismatch: false, toolCount: 1 }) }
+  const board = {
+    detail: async () => { boardCalls++; return { issue: {}, description: '' } },
+    transitions: async () => { boardCalls++; return [] },
+  }
+  const options = { jql: '', limit: 50, timeoutMs: 1000, promptTemplate: '' }
+  const server = createServer((req, res) => void handler(req, res))
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const base = `http://127.0.0.1:${server.address().port}`
+  try {
+    registerRoutes(web, bridge, board, options, { requestRejection: () => undefined })
+    const badKey = await fetch(`${base}/plugins/atlassian/issue/%E0%A4%A`)
+    assert.equal(badKey.status, 400)
+    assert.equal((await badKey.json()).code, 'bad-request')
+    const res = { status: 0, body: '', writeHead(status) { this.status = status; return this }, end(body) { this.body = body ?? '' } }
+    await handler({ url: 'http://[', method: 'GET' }, res)
+    assert.equal(res.status, 400)
+    assert.match(res.body, /Invalid request URL/)
+    assert.equal(boardCalls, 0, 'malformed requests must not reach the board')
   } finally { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)) }
 })

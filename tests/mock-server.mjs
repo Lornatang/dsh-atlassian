@@ -2,6 +2,8 @@ import { createServer } from 'node:http'
 
 export async function startMockServer() {
   const calls = []
+  let connectionCount = 0
+  let closedCount = 0
   const jiraAuth = `Basic ${Buffer.from('jira-user:jira-password').toString('base64')}`
   const confluenceAuth = 'Bearer confluence-token'
   const server = createServer(async (req, res) => {
@@ -32,7 +34,8 @@ export async function startMockServer() {
     else { status = 404; result = { message: 'not found' } }
     res.writeHead(status, { 'content-type': 'application/json' }).end(result === undefined ? undefined : JSON.stringify(result))
   })
+  server.on('connection', (socket) => { connectionCount++; socket.on('close', () => { closedCount++ }) })
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   const origin = `http://127.0.0.1:${server.address().port}`
-  return { jiraUrl: origin + '/jira', confluenceUrl: origin + '/confluence', calls, close: () => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve) }) }
+  return { jiraUrl: origin + '/jira', confluenceUrl: origin + '/confluence', calls, connections: () => connectionCount, closedConnections: () => closedCount, close: () => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve) }) }
 }

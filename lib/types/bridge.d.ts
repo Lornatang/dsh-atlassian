@@ -36,6 +36,7 @@ export declare function publicToolName(server: string, tool: string): string;
 export declare class AtlassianBridge {
     #private;
     constructor(host: BridgeHost, options: BridgeOptions);
+    epoch(): number;
     snapshot(): BridgeSnapshot;
     rawNames(): readonly string[];
     rawNameMatching(pattern: RegExp): string | undefined;

@@ -146,3 +146,31 @@ test('self-signed TLS requires a specifically trusted certificate', async (t) =>
     } finally { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)) }
   } finally { await rm(root, { recursive: true, force: true }) }
 })
+
+test('Server REST clients reuse keep-alive connections until reconnect or disconnect', async () => {
+  const mock = await startMockServer()
+  const root = await mkdtemp(join(tmpdir(), 'atlassian-keepalive-'))
+  const file = join(root, 'session.json')
+  const definitions = new Map()
+  const host = { logger, register(definition) { definitions.set(definition.name, definition); return () => definitions.delete(definition.name) } }
+  const config = { jiraUrl: mock.jiraUrl, confluenceUrl: mock.confluenceUrl, jiraCaFile: '', confluenceCaFile: '', allowInsecureHttp: true }
+  const bridge = new ServerBridge(host, { serverName: 'atlassian', server: config, store: new SessionStore(file), timeoutMs: 5000 })
+  try {
+    await bridge.start()
+    assert.equal((await bridge.authorize({ jiraUsername: 'jira-user', jiraSecret: 'jira-password', confluenceSecret: 'confluence-token' })).status, 'ready')
+    assert.equal(mock.connections(), 2, 'one pooled connection per product')
+    const board = new JiraBoard(bridge)
+    await board.load({ jql: 'project = DEMO', limit: 10, timeoutMs: 5000 })
+    await board.transitions('DEMO-1', 5000)
+    await definitions.get('mcp__atlassian__getConfluencePage').execute({ pageId: '123' }, {})
+    await definitions.get('mcp__atlassian__getVisibleJiraProjects').execute({}, {})
+    assert.equal(mock.connections(), 2, 'subsequent requests reuse the pooled sockets')
+    const epoch = bridge.epoch()
+    await bridge.disconnect()
+    assert.ok(bridge.epoch() > epoch)
+    for (let i = 0; i < 120 && mock.closedConnections() < 2; i++) await new Promise((resolve) => setTimeout(resolve, 25))
+    assert.equal(mock.closedConnections(), 2, 'disconnect closes the pooled sockets')
+    assert.equal((await bridge.authorize({ jiraUsername: 'jira-user', jiraSecret: 'jira-password', confluenceSecret: 'confluence-token' })).status, 'ready')
+    assert.equal(mock.connections(), 4, 'a reconnect opens a fresh pool')
+  } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+})

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.11 - 2026-11-17
+
+- Invalidate the cached Jira site whenever the connection is replaced and deduplicate concurrent site lookups, so a reconnect can never serve data from the previous site.
+- Reuse keep-alive connections for self-hosted REST requests and close the socket pool on reconnect, disconnect, and disposal.
+- Scan Cloud SSE size limits with native buffer searches instead of a per-byte loop, and wake connection waiters on state changes instead of polling.
+- Share one status poller between the settings and board client panels and skip re-renders when the snapshot is unchanged.
+- Expand issue keys and summaries literally in board handoff prompts.
+- Destroy stored credentials when a configuration change points the profile at a different endpoint identity.
+- Reject malformed request URLs and issue-key encodings with 400 responses, and bound request-body reads with a deadline.
+- Bound the cross-process refresh lock even when toolCallTimeoutMs is configured very large.
+- Include a GitHub release archive; npm is not published for this release.
+
 ## 0.1.10 - 2026-11-15
 
 - Coordinate OAuth token rotation across processes sharing a profile, including delayed responses, shutdown, callback-port changes, and concurrent session updates.

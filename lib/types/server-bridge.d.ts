@@ -14,6 +14,7 @@ export declare class ServerBridge {
     snapshot(): BridgeSnapshot;
     rawNames(): readonly string[];
     rawNameMatching(pattern: RegExp): string | undefined;
+    epoch(): number;
     start(): Promise<void>;
     authorize(input?: Args): Promise<BridgeSnapshot>;
     disconnect(): Promise<BridgeSnapshot>;

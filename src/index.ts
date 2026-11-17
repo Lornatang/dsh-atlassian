@@ -21,9 +21,13 @@ interface ConfigEditor {
   edit(entry: { options: { id: string } }, change: (current: unknown, inherited: unknown) => unknown): Promise<void>
 }
 
+function identityFor(settings: Settings): string {
+  return settings.mode === 'server' ? `server:${settings.server.jiraUrl}\0${settings.server.confluenceUrl}` : settings.url
+}
+
 export function apply(ctx: Context, config: Settings): void {
   const scope = ctx as unknown as Scope
-  const identity = config.mode === 'server' ? `server:${config.server.jiraUrl}\0${config.server.confluenceUrl}` : config.url
+  const identity = identityFor(config)
   const store = new SessionStore(sessionFileFor(config.serverName, identity, scope.profileContext?.patchPath))
   const host = { register: (definition: Parameters<typeof ctx.tools.register>[0]) => ctx.tools.register(definition), logger: ctx.logger }
   const bridge: PluginBridge = config.mode === 'server'
@@ -33,11 +37,15 @@ export function apply(ctx: Context, config: Settings): void {
   const connection: EditableConnection = {
     snapshot: () => ({ ...config.server }),
     update: async (input) => {
-      configureEndpoints(config, input)
+      const next = configureEndpoints(config, input)
       const editor = scope.get('configEditor') as ConfigEditor | undefined
       const entry = editor?.entries().find((candidate) => candidate.options.id === 'atlassian')
       if (!editor || !entry) throw new Error('DSH configuration editor is unavailable')
       await editor.edit(entry, (current) => configureEndpoints(Config(current as Parameters<typeof Config>[0]), input))
+      if (identityFor(next) !== identity) {
+        // The profile now points at a different endpoint; leave no credentials behind for the old one.
+        void store.destroy().catch((error: unknown) => ctx.logger.warn(`atlassian: ${String(error)}`))
+      }
     },
   }
   ctx.effect(() => () => bridge.dispose(), 'atlassian:connection')

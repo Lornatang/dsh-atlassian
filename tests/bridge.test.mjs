@@ -503,3 +503,33 @@ test('OAuth rejects an insecure discovered token endpoint before sending the cod
     assert.equal(saved.tokens, undefined)
   } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
 })
+
+test('a reconnect invalidates the cached board site and resolves it again', async () => {
+  const mock = await startMockMcp()
+  const root = await mkdtemp(join(tmpdir(), 'atlassian-epoch-'))
+  const file = join(root, 'session.json')
+  const bridge = new AtlassianBridge({ logger, register() { return () => {} } }, {
+    serverName: 'atlassian', url: mock.url, redirectPort: 0, toolCallTimeoutMs: 5000,
+    expectedSite: '', authorizationTimeoutMs: 5000, autoOpenBrowser: false, store: new SessionStore(file),
+  })
+  const resourceCalls = () => mock.calls.filter((call) => call.method === 'tools/call' && call.params.name === 'getAccessibleAtlassianResources').length
+  try {
+    await bridge.start()
+    await waitFor(() => bridge.snapshot().status === 'ready')
+    const board = new JiraBoard(bridge)
+    assert.equal(await board.cloudId(), 'mock-cloud-id')
+    assert.equal(board.site, 'example.atlassian.net')
+    const before = resourceCalls()
+    assert.equal(await board.cloudId(), 'mock-cloud-id')
+    assert.equal(resourceCalls(), before, 'a live connection keeps its cached site')
+    const epoch = bridge.epoch()
+    await bridge.disconnect()
+    assert.ok(bridge.epoch() > epoch)
+    assert.equal(board.site, undefined, 'the cached site must not survive a disconnect')
+    await bridge.start()
+    await waitFor(() => bridge.snapshot().status === 'ready')
+    assert.equal(await board.cloudId(), 'mock-cloud-id')
+    assert.equal(resourceCalls(), before + 2, 'the bridge and the board each resolve the site again')
+    assert.equal(board.site, 'example.atlassian.net')
+  } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+})

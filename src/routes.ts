@@ -23,15 +23,25 @@ function respond(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
   res.end(JSON.stringify(value))
 }
+const BODY_TIMEOUT_MS = 30000
 async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = []
   let size = 0
-  for await (const chunk of req) {
-    const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))
-    size += data.length
-    if (size > 65536) throw new BoardError('too-large', 'Request body is too large')
-    chunks.push(data)
-  }
+  let timedOut = false
+  // A slow-drip body must not hold the handler open indefinitely.
+  const timer = setTimeout(() => { timedOut = true; req.destroy() }, BODY_TIMEOUT_MS)
+  timer.unref()
+  try {
+    for await (const chunk of req) {
+      const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))
+      size += data.length
+      if (size > 65536) throw new BoardError('too-large', 'Request body is too large')
+      chunks.push(data)
+    }
+  } catch (error) {
+    if (timedOut) throw new BoardError('request-timeout', 'Request body timed out')
+    throw error
+  } finally { clearTimeout(timer) }
   if (!size) return {}
   let value: unknown
   try { value = JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { throw new BoardError('bad-request', 'Invalid JSON') }
@@ -49,7 +59,8 @@ export function registerRoutes(web: RouteRegistrar, bridge: PluginBridge, board:
     if (!fence) { respond(res, 503, { ok: false, error: 'DSH connection service is unavailable' }); return }
     const rejection = fence.requestRejection(req)
     if (rejection !== undefined) { res.writeHead(rejection).end(); return }
-    const url = new URL(req.url ?? '/', 'http://localhost')
+    let url: URL
+    try { url = new URL(req.url ?? '/', 'http://localhost') } catch { respond(res, 400, { ok: false, code: 'bad-request', error: 'Invalid request URL' }); return }
     const action = url.pathname.slice(ROUTE_PREFIX.length).replace(/^\//, '')
     const method = req.method ?? 'GET'
     try {
@@ -79,7 +90,8 @@ export function registerRoutes(web: RouteRegistrar, bridge: PluginBridge, board:
       }
       const match = /^issue\/([^/]+)(\/transitions)?$/.exec(action)
       if (method === 'GET' && match) {
-        const key = decodeURIComponent(match[1] ?? '')
+        let key: string
+        try { key = decodeURIComponent(match[1] ?? '') } catch { throw new BoardError('bad-request', 'Invalid issue key encoding') }
         if (match[2]) respond(res, 200, { ok: true, transitions: await board.transitions(key, options.timeoutMs) })
         else respond(res, 200, { ok: true, ...await board.detail(key, options.timeoutMs) })
         return

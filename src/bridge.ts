@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { setTimeout as delay } from 'node:timers/promises'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { UnauthorizedError, auth } from '@modelcontextprotocol/sdk/client/auth.js'
@@ -78,6 +77,7 @@ export class AtlassianBridge {
   #controller = new AbortController()
   #flight?: { owner: OperationContext; done: Promise<void> }
   readonly #refreshes = new Set<Promise<Response>>()
+  readonly #waiters = new Set<() => void>()
 
   constructor(host: BridgeHost, options: BridgeOptions) {
     this.#host = host
@@ -141,7 +141,8 @@ export class AtlassianBridge {
           try {
             // A cancelled local request may still rotate its token remotely. Finish
             // and persist the response before allowing another process to refresh.
-            const response = await network.fetch(value, { ...init, signal: AbortSignal.timeout(Math.max(30000, this.#options.toolCallTimeoutMs)) })
+            // Bound the cross-process refresh lock even when toolCallTimeoutMs is huge.
+            const response = await network.fetch(value, { ...init, signal: AbortSignal.timeout(Math.min(120000, Math.max(30000, this.#options.toolCallTimeoutMs))) })
             if (response.ok) {
               const parsed = OAuthTokensSchema.omit({ issuer: true }).safeParse(await response.clone().json())
               if (!parsed.success) throw new Error('atlassian: invalid refresh response')
@@ -171,8 +172,8 @@ export class AtlassianBridge {
       store: options.store, redirectUri: () => this.#callback.redirectUri, allowLoopbackHttp: network.allowLoopbackHttp, logger: host.logger,
       onAuthorizationUrl: (url) => {
         if (!active()) return
-        this.#url = url
-        if (this.#status === 'ready') { this.#status = 'error'; this.#error = 'Atlassian authorization expired; reconnect to authorize again' }
+        this.#setUrl(url)
+        if (this.#status === 'ready') { this.#setStatus('error'); this.#error = 'Atlassian authorization expired; reconnect to authorize again' }
       },
       active,
       tokenRead: (tokens) => { const op = this.#operation.getStore(); if (op && !op.observedTokens) op.observedTokens = tokens },
@@ -185,6 +186,23 @@ export class AtlassianBridge {
   }
 
   #newOperation(): OperationContext { return { generation: this.#generation, signal: this.#controller.signal } }
+
+  epoch(): number { return this.#generation }
+
+  #setStatus(status: BridgeStatus): void { this.#status = status; this.#wake() }
+  #setUrl(url: string | undefined): void { this.#url = url; this.#wake() }
+  #wake(): void { const waiters = [...this.#waiters]; this.#waiters.clear(); for (const wake of waiters) wake() }
+  /** Resolve as soon as the predicate holds, or at the deadline like the previous polling loop. */
+  #waitFor(timeoutMs: number, done: () => boolean): Promise<void> {
+    return new Promise((resolve) => {
+      if (done()) { resolve(); return }
+      const finish = (): void => { clearTimeout(timer); this.#waiters.delete(wake); resolve() }
+      const wake = (): void => { if (done()) finish(); else this.#waiters.add(wake) }
+      const timer = setTimeout(finish, timeoutMs)
+      timer.unref()
+      this.#waiters.add(wake)
+    })
+  }
 
   snapshot(): BridgeSnapshot {
     const site = this.#options.store.current.site
@@ -204,7 +222,7 @@ export class AtlassianBridge {
     if (this.#boot) return this.#boot
     const generation = this.#generation
     const boot = (async () => {
-      this.#status = 'connecting'
+      this.#setStatus('connecting')
       await this.#options.store.load(this.#controller.signal)
       if (this.#disposed || generation !== this.#generation) return
       await this.#callback.listen(this.#options.redirectPort)
@@ -212,12 +230,12 @@ export class AtlassianBridge {
       await this.#options.store.prepareRedirect(this.#callback.redirectUri, this.#controller.signal)
       if (this.#disposed || generation !== this.#generation) return
       this.#launch(false, generation)
-      for (let i = 0; i < 600 && this.#status === 'connecting'; i++) await delay(25)
+      await this.#waitFor(15000, () => this.#status !== 'connecting')
     })()
     this.#boot = boot
     try { await boot } catch (error) {
       if (!this.#disposed && generation === this.#generation) {
-        this.#status = 'error'
+        this.#setStatus('error')
         this.#error = error instanceof Error ? error.message : String(error)
       }
       throw error
@@ -234,17 +252,19 @@ export class AtlassianBridge {
     if (!this.#work) {
       await this.#closeClient()
       this.#clearTools()
-      this.#url = undefined
+      this.#setUrl(undefined)
       this.#launch(true, this.#generation)
     }
-    for (let i = 0; i < 800 && this.#status === 'connecting' && !this.#url; i++) await delay(25)
+    // Wait for a settled state: the authorization URL is published just before
+    // the status leaves 'connecting', and callers act on the returned status.
+    await this.#waitFor(20000, () => this.#status !== 'connecting')
     return this.snapshot()
   }
 
   #launch(open: boolean, generation: number): void {
     const work = this.#connect(open, generation).catch((error: unknown) => {
       if (!this.#disposed && generation === this.#generation) {
-        this.#status = 'error'
+        this.#setStatus('error')
         this.#error = error instanceof Error ? error.message : String(error)
         this.#host.logger.error(`atlassian: ${this.#error}`)
       }
@@ -257,9 +277,9 @@ export class AtlassianBridge {
     const check = (): void => { if (this.#disposed || generation !== this.#generation) throw new Error('connection cancelled') }
     for (let attempt = 0; attempt < 2; attempt++) {
       check()
-      this.#status = 'connecting'
+      this.#setStatus('connecting')
       this.#error = undefined
-      const client = new Client({ name: 'dsh-atlassian', version: '0.1.10' })
+      const client = new Client({ name: 'dsh-atlassian', version: '0.1.11' })
       client.onerror = () => { this.#operation.getStore()?.releaseRefresh?.() }
       const transport = new StreamableHTTPClientTransport(new URL(this.#options.url), { authProvider: this.#provider, fetch: this.#fetch })
       const send = transport.send.bind(transport)
@@ -269,7 +289,7 @@ export class AtlassianBridge {
           try { return await send(message, options) } catch (error) {
             operation.releaseRefresh?.()
             if (!this.#disposed && operation.generation === this.#generation && this.#status === 'ready' && operation.observedTokens && !this.#options.store.current.tokens) {
-              this.#status = 'error'
+              this.#setStatus('error')
               this.#error = 'Atlassian authorization expired; reconnect to authorize again'
             }
             if (!(error instanceof RedirectRegistrationChanged)) throw error
@@ -286,7 +306,7 @@ export class AtlassianBridge {
         if (!(error instanceof UnauthorizedError) || attempt !== 0) throw error
         const state = this.#url ? new URL(this.#url).searchParams.get('state') ?? undefined : undefined
         const waiting = this.#callback.waitForCode(this.#options.authorizationTimeoutMs, state)
-        this.#status = 'authorizing'
+        this.#setStatus('authorizing')
         if (open && this.#url && this.#options.autoOpenBrowser) void openInBrowser(this.#url)
         const callback = await waiting
         check()
@@ -300,8 +320,8 @@ export class AtlassianBridge {
       check()
       await this.#readSite(client, generation, this.#controller.signal)
       check()
-      this.#url = undefined
-      this.#status = 'ready'
+      this.#setUrl(undefined)
+      this.#setStatus('ready')
       return
     }
     throw new Error('Atlassian authorization did not establish a connection')
@@ -371,7 +391,7 @@ export class AtlassianBridge {
     this.#generation++
     this.#controller.abort()
     this.#controller = new AbortController()
-    this.#status = 'idle'
+    this.#setStatus('idle')
     this.#callback.cancelWait()
     await this.#boot?.catch(() => undefined)
     this.#callback.cancelWait()
@@ -380,7 +400,7 @@ export class AtlassianBridge {
     await this.#closeClient()
     this.#clearTools()
     await this.#options.store.destroy()
-    this.#url = undefined
+    this.#setUrl(undefined)
     this.#error = undefined
     return this.snapshot()
   }
@@ -389,7 +409,7 @@ export class AtlassianBridge {
     this.#disposed = true
     this.#generation++
     this.#controller.abort()
-    this.#status = 'idle'
+    this.#setStatus('idle')
     this.#callback.cancelWait()
     await this.#boot?.catch(() => undefined)
     this.#callback.cancelWait()
