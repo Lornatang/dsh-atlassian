@@ -218,12 +218,16 @@ export function JiraBoardPanel(): React.ReactElement {
   const [detail, setDetail] = React.useState<{ issue: Issue; description: string; transitions: Transition[] }>()
   const [message, setMessage] = React.useState('')
   const [loading, setLoading] = React.useState(false)
+  // A Confluence-only profile has no Jira tools; the board shows an empty state
+  // instead of reporting a missing tool as an error on every refresh.
+  const jiraConfigured = snapshot?.mode !== 'server' || !!snapshot?.server?.jiraUrl
   const refresh = React.useCallback(async (value: string) => {
+    if (!jiraConfigured) { setBoard(undefined); setMessage(''); return }
     setLoading(true)
     try { const result = await api<Board>(`/board?jql=${encodeURIComponent(value)}`); setBoard(result); setJql(result.jql); setMessage('') }
     catch (error) { setMessage(error instanceof Error ? error.message : String(error)) }
     finally { setLoading(false) }
-  }, [])
+  }, [jiraConfigured])
   React.useEffect(() => { if (snapshot?.status === 'ready') void refresh(snapshot.board.jql) }, [snapshot?.status, refresh])
   const issues = (board?.issues ?? []).filter((item) => (!project || item.projectKey === project) && `${item.key} ${item.summary} ${item.projectName ?? ''}`.toLowerCase().includes(query.toLowerCase()))
   const projects = [...new Set((board?.issues ?? []).map((item) => item.projectKey).filter((item): item is string => !!item))]
@@ -272,7 +276,7 @@ export function JiraBoardPanel(): React.ReactElement {
         ...columnIssues.map((item) => h('div', { key: item.key, className: 'dab-issue', 'data-dsh-jira-card': '', role: 'button', tabIndex: 0, onClick: () => { void inspect(item.key) }, onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); void inspect(item.key) } } },
           h('label', { className: 'dab-issue-key', onClick: (event: React.MouseEvent) => event.stopPropagation() }, h('input', { type: 'checkbox', 'aria-label': `Select ${item.key}`, checked: selected.includes(item.key), onChange: (event: React.ChangeEvent<HTMLInputElement>) => setSelected(event.target.checked ? [...selected, item.key] : selected.filter((key) => key !== item.key)) }), item.key),
           h('div', { className: 'dab-issue-summary' }, item.summary), h('small', { className: 'dab-issue-meta' }, item.projectName ?? item.projectKey ?? ''))))
-    })) : h('div', { className: 'dab-empty' }, snapshot?.status === 'ready' ? 'No issues match this view.' : 'Connect Atlassian in Settings to see your Jira issues.'),
+    })) : h('div', { className: 'dab-empty' }, snapshot?.status !== 'ready' ? 'Connect Atlassian in Settings to see your Jira issues.' : jiraConfigured ? 'No issues match this view.' : 'No Jira service is configured. Add a Jira URL in Settings.'),
     board?.truncated ? h('p', { className: 'dab-message' }, `Showing up to ${String(board.limit)} issues. Narrow the query for more.`) : null,
     detail ? h('aside', { className: 'dab-detail', 'aria-label': 'Issue details' }, h('div', { className: 'dab-detail-head' }, h('span', { className: 'dab-eyebrow' }, 'Issue details'), h('button', { className: 'dab-button', onClick: () => setDetail(undefined) }, icon('close'), 'Close')),
       h('h3', { className: 'dab-title', style: { fontSize: 19, marginTop: 16 } }, detail.issue.key, ' ', detail.issue.summary), detail.issue.url ? h('p', { style: { marginTop: 8 } }, h('a', { className: 'dab-link', href: detail.issue.url, target: '_blank', rel: 'noreferrer' }, 'Open in Jira')) : null,

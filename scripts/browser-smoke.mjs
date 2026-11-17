@@ -221,7 +221,7 @@ export async function verifyBrowser(launchUrl, temp, serverMode = false) {
       })()`)
       let connected = false
       for (let i = 0; i < 150; i++) {
-        connected = await evaluate(`document.querySelector('[role=status]')?.textContent.includes('Connected')`)
+        connected = await evaluate(`document.querySelector('[data-dab-settings] [role=status]')?.textContent.includes('Connected')`)
         if (connected) break
         await delay(100)
       }

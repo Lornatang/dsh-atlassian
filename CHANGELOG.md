@@ -6,6 +6,7 @@
 - Reuse keep-alive connections for self-hosted REST requests and close the socket pool on reconnect, disconnect, and disposal.
 - Scan Cloud SSE size limits with native buffer searches instead of a per-byte loop, and wake connection waiters on state changes instead of polling.
 - Share one status poller between the settings and board client panels and skip re-renders when the snapshot is unchanged.
+- Show a clear empty state on the Jira board for Confluence-only profiles instead of a missing-tool error.
 - Expand issue keys and summaries literally in board handoff prompts.
 - Destroy stored credentials when a configuration change points the profile at a different endpoint identity.
 - Reject malformed request URLs and issue-key encodings with 400 responses, and bound request-body reads with a deadline.
