@@ -34,7 +34,7 @@ dsh plugin --profile <name> add @lornatang/dsh-atlassian
 dsh plugin --profile <name> remove @lornatang/dsh-atlassian
 ```
 
-For the GitHub-only 0.1.11 release, use `dsh plugin --profile <name> add https://github.com/Lornatang/dsh-atlassian/releases/download/v0.1.11/lornatang-dsh-atlassian-0.1.11.tgz`. The npm registry version may be older.
+The same release is also attached as an archive on GitHub: `dsh plugin --profile <name> add https://github.com/Lornatang/dsh-atlassian/releases/download/v0.1.11/lornatang-dsh-atlassian-0.1.11.tgz`.
 
 `add` composes the layer into the profile: the profile's `cordis.patch.yml` gains an insert entry with row id `atlassian`, package `@lornatang/dsh-atlassian`, and the five values the shipped patch carries — `mode: cloud`, `serverName: atlassian`, `url: https://mcp.atlassian.com/v1/mcp`, `redirectPort: 3334` and `autoOpenBrowser: true`. The manifest declares `dsh.bundle.patch: ./cordis.patch.yml`, which is the declaration the reconcile step reads; `remove` deletes the entry again. Restart DSH after either command, because the profile composes its rows and its client half only at startup, then open Settings → Atlassian. Releases before 0.1.5 published this package as `@lornatang/dsh-atlassian-bridge`; add the scoped name, remove the old package from the same profile and restart once — the row, its settings and the stored credentials survive.
 

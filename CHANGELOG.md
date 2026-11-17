@@ -11,7 +11,7 @@
 - Destroy stored credentials when a configuration change points the profile at a different endpoint identity.
 - Reject malformed request URLs and issue-key encodings with 400 responses, and bound request-body reads with a deadline.
 - Bound the cross-process refresh lock even when toolCallTimeoutMs is configured very large.
-- Include a GitHub release archive; npm is not published for this release.
+- Include a GitHub release archive; this release is also published to npm.
 
 ## 0.1.10 - 2026-11-15
 
