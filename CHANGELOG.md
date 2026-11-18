@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.12 - 2026-11-18
+
+- Re-arm the OAuth callback listener when authorization starts, so a callback port that becomes available after a failed bind no longer leaves the published redirect URI pointing at port 0.
+- Publish the authorization URL only while a callback wait is armed, preventing a browser flow that would land on an unbound listener and fail with HTTP 400.
+- Reset the observed token snapshot after a successful credential invalidation, so the built-in re-authorization no longer fails with a stale-credentials conflict.
+- Hold the shared session lease until an in-flight token exchange settles instead of releasing it from the client error hook, avoiding a spurious invalid-session-lock failure.
+- Validate the site label reported by the server before caching it.
+- Reject malformed percent-encoded issue keys with a 400 response and bound request-body reads with a deadline.
+- Reflect saved connection settings in the live configuration instead of only in the planner draft.
+- Include a GitHub release archive; this release is also published to npm.
+
 ## 0.1.11 - 2026-11-17
 
 - Invalidate the cached Jira site whenever the connection is replaced and deduplicate concurrent site lookups, so a reconnect can never serve data from the previous site.

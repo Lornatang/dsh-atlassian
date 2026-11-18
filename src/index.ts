@@ -37,7 +37,7 @@ export function apply(ctx: Context, config: Settings): void {
   const connection: EditableConnection = {
     snapshot: () => ({ ...config.server }),
     update: async (input) => {
-      const next = configureEndpoints(config, input)
+      const next = Object.assign(config, configureEndpoints(config, input))
       const editor = scope.get('configEditor') as ConfigEditor | undefined
       const entry = editor?.entries().find((candidate) => candidate.options.id === 'atlassian')
       if (!editor || !entry) throw new Error('DSH configuration editor is unavailable')

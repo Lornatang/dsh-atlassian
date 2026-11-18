@@ -111,9 +111,16 @@ export class CallbackServer {
   #pending?: Pending
 
   get redirectUri(): string { return `http://127.0.0.1:${this.#port}/callback` }
+  get listening(): boolean { return this.#server?.listening === true }
 
   async listen(preferredPort: number): Promise<number> {
-    if (this.#server) return this.#port
+    if (this.#server?.listening) return this.#port
+    const stale = this.#server
+    if (stale) {
+      this.#server = undefined
+      this.cancelWait()
+      await new Promise<void>((resolve) => { stale.close(() => resolve()) })
+    }
     const server = createServer((req, res) => {
       let url: URL
       try { url = new URL(req.url ?? '/', 'http://127.0.0.1') } catch { res.writeHead(400).end(); return }
@@ -140,7 +147,10 @@ export class CallbackServer {
     })
     try { this.#port = await bind(preferredPort) }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EADDRINUSE' || preferredPort === 0) throw error
+      const code = (error as NodeJS.ErrnoException).code
+      // A privileged or unavailable port must not leave redirectUri pointing at
+      // port 0; retry any bind failure that a dynamic port can avoid.
+      if (preferredPort === 0 || (code !== 'EADDRINUSE' && code !== 'EACCES' && code !== 'EADDRNOTAVAIL')) throw error
       this.#port = await bind(0)
     }
     server.on('error', () => this.cancelWait())
@@ -202,8 +212,9 @@ export class AtlassianOAuthProvider implements OAuthClientProvider {
   readonly #lease: () => SessionLease | undefined
   readonly #observedTokens: () => OAuthTokens | undefined
   readonly #signal: () => AbortSignal | undefined
+  readonly #resetObservation: () => void
 
-  constructor(options: { store: SessionStore; redirectUri: () => string; onAuthorizationUrl: (url: string) => void; allowLoopbackHttp: boolean; logger: Logger; active?: () => boolean; tokenRead?: (tokens: OAuthTokens | undefined) => void; refreshExpected?: () => OAuthTokens | undefined; authFinished?: () => void; lease?: () => SessionLease | undefined; observedTokens?: () => OAuthTokens | undefined; signal?: () => AbortSignal | undefined }) {
+  constructor(options: { store: SessionStore; redirectUri: () => string; onAuthorizationUrl: (url: string) => void; allowLoopbackHttp: boolean; logger: Logger; active?: () => boolean; tokenRead?: (tokens: OAuthTokens | undefined) => void; refreshExpected?: () => OAuthTokens | undefined; authFinished?: () => void; lease?: () => SessionLease | undefined; observedTokens?: () => OAuthTokens | undefined; signal?: () => AbortSignal | undefined; resetObservation?: () => void }) {
     this.#store = options.store
     this.#redirect = options.redirectUri
     this.#onUrl = options.onAuthorizationUrl
@@ -215,6 +226,7 @@ export class AtlassianOAuthProvider implements OAuthClientProvider {
     this.#lease = options.lease ?? (() => undefined)
     this.#observedTokens = options.observedTokens ?? (() => undefined)
     this.#signal = options.signal ?? (() => undefined)
+    this.#resetObservation = options.resetObservation ?? (() => undefined)
   }
   #check(): void { if (!this.#active()) throw new Error('atlassian: connection cancelled') }
   get redirectUrl(): string { this.#check(); return this.#redirect() }
@@ -254,10 +266,15 @@ export class AtlassianOAuthProvider implements OAuthClientProvider {
   async invalidateCredentials(scope: 'all' | 'client' | 'tokens' | 'verifier' | 'discovery'): Promise<void> {
     try {
       const expected = this.#refreshExpected() ?? this.#observedTokens()
-      if (scope === 'all') await this.#store.clearCredentialsIf(this.#active, expected, this.#lease(), this.#signal(), true, 'tokens', 'clientInformation', 'codeVerifier')
-      else if (scope === 'client') await this.#store.clearCredentialsIf(this.#active, expected, this.#lease(), this.#signal(), true, 'clientInformation')
-      else if (scope === 'tokens') await this.#store.clearCredentialsIf(this.#active, expected, this.#lease(), this.#signal(), true, 'tokens')
-      else if (scope === 'verifier') await this.#store.clearCredentialsIf(this.#active, expected, this.#lease(), this.#signal(), true, 'codeVerifier')
+      let cleared = false
+      if (scope === 'all') cleared = await this.#store.clearCredentialsIf(this.#active, expected, this.#lease(), this.#signal(), true, 'tokens', 'clientInformation', 'codeVerifier')
+      else if (scope === 'client') cleared = await this.#store.clearCredentialsIf(this.#active, expected, this.#lease(), this.#signal(), true, 'clientInformation')
+      else if (scope === 'tokens') cleared = await this.#store.clearCredentialsIf(this.#active, expected, this.#lease(), this.#signal(), true, 'tokens')
+      else if (scope === 'verifier') cleared = await this.#store.clearCredentialsIf(this.#active, expected, this.#lease(), this.#signal(), true, 'codeVerifier')
+      // Only a clear this operation actually performed invalidates its observation.
+      // If another process removed or replaced the session, the stale observation
+      // must keep refusing credential writes.
+      if (cleared && (scope === 'all' || scope === 'tokens')) this.#resetObservation()
     } finally { this.#authFinished() }
   }
 }

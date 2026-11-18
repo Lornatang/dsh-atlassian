@@ -12,9 +12,9 @@ export declare class ServerBridge {
         timeoutMs: number;
     });
     snapshot(): BridgeSnapshot;
+    epoch(): number;
     rawNames(): readonly string[];
     rawNameMatching(pattern: RegExp): string | undefined;
-    epoch(): number;
     start(): Promise<void>;
     authorize(input?: Args): Promise<BridgeSnapshot>;
     disconnect(): Promise<BridgeSnapshot>;

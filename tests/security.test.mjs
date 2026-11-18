@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
+import { connect } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -124,6 +125,64 @@ test('Jira board ignores unsafe resource URLs from the remote service', async ()
   assert.equal(board.site, 'example.test')
 })
 
+test('Jira board refreshes its cached site when the bridge reconnects', async () => {
+  let epoch = 0
+  let lookups = 0
+  const bridge = {
+    epoch: () => epoch,
+    rawNameMatching: () => 'getAccessibleAtlassianResources',
+    callTool: async () => {
+      lookups++
+      return [{ type: 'text', text: JSON.stringify([
+        epoch === 0
+          ? { id: 'first', url: 'https://one.example.test' }
+          : { id: 'second', url: 'https://two.example.test' },
+      ]) }]
+    },
+  }
+  const board = new JiraBoard(bridge)
+  assert.equal(await board.cloudId(), 'first')
+  assert.equal(board.site, 'one.example.test')
+  assert.equal(await board.cloudId(), 'first')
+  assert.equal(lookups, 1)
+  epoch = 1
+  assert.equal(await board.cloudId(), 'second')
+  assert.equal(board.site, 'two.example.test')
+  assert.equal(lookups, 2)
+})
+
+test('a successful token invalidation resets the stale observation so reauthorization can proceed', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'atlassian-reset-'))
+  try {
+    const file = sessionFileFor('atlassian', 'https://example.test/mcp', join(root, 'profiles', 'one', 'cordis.patch.yml'))
+    const store = new SessionStore(file)
+    await store.load()
+    await store.patch({ redirectUri: 'http://127.0.0.1:3000/callback', site: 'example.test' })
+    await store.saveTokens({ access_token: 'stale-access', refresh_token: 'stale-refresh', token_type: 'Bearer' }, () => true, undefined, undefined, undefined, true)
+    let observed = store.current.tokens
+    let resets = 0
+    const provider = new AtlassianOAuthProvider({
+      store,
+      redirectUri: () => store.current.redirectUri,
+      onAuthorizationUrl() {},
+      allowLoopbackHttp: false,
+      logger: { info() {}, warn() {}, error() {} },
+      active: () => true,
+      observedTokens: () => observed,
+      refreshExpected: () => undefined,
+      resetObservation: () => { resets++; observed = undefined },
+    })
+    await provider.invalidateCredentials('tokens')
+    assert.equal(store.current.tokens, undefined)
+    assert.equal(observed, undefined)
+    assert.equal(resets, 1)
+    // The follow-up authorization-code exchange must be able to write again;
+    // before the fix the stale observation made every guarded patch reject.
+    await provider.saveCodeVerifier('fresh-verifier')
+    assert.equal(store.current.codeVerifier, 'fresh-verifier')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('OAuth callback requires state, rejects stray requests and escapes error text', async () => {
   const server = new CallbackServer()
   await server.listen(0)
@@ -197,6 +256,16 @@ test('HTTP routes fail closed until the DSH connection fence is available', asyn
     assert.equal((await fetch(url)).status, 200)
     assert.equal((await fetch(url.replace('/status', '/configure'), { method: 'POST', body: '{}' })).status, 200)
     assert.equal(updates, 1)
+    const raw = await new Promise((resolve) => {
+      const socket = connect(server.address().port, '127.0.0.1', () => {
+        socket.write('GET http://[ HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n')
+      })
+      let data = ''
+      socket.on('data', (chunk) => { data += chunk })
+      socket.on('end', () => resolve(data))
+      socket.on('error', () => resolve(data))
+    })
+    assert.match(raw, /^HTTP\/1\.1 400/)
   } finally { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)) }
 })
 

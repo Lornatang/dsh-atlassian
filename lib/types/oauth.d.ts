@@ -22,6 +22,7 @@ export declare function createCloudFetch(serverUrl: URL): {
 export declare class CallbackServer {
     #private;
     get redirectUri(): string;
+    get listening(): boolean;
     listen(preferredPort: number): Promise<number>;
     waitForCode(timeoutMs: number, state: string | undefined, signal?: AbortSignal): Promise<AuthorizationCallback>;
     cancelWait(): void;
@@ -42,6 +43,7 @@ export declare class AtlassianOAuthProvider implements OAuthClientProvider {
         lease?: () => SessionLease | undefined;
         observedTokens?: () => OAuthTokens | undefined;
         signal?: () => AbortSignal | undefined;
+        resetObservation?: () => void;
     });
     get redirectUrl(): string;
     get clientMetadata(): OAuthClientMetadata;

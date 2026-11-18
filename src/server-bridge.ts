@@ -91,9 +91,9 @@ export class ServerBridge {
     }
   }
 
+  epoch(): number { return this.#generation }
   rawNames(): readonly string[] { return [...this.#operations.keys()] }
   rawNameMatching(pattern: RegExp): string | undefined { return this.rawNames().find((name) => pattern.test(name)) }
-  epoch(): number { return this.#generation }
 
   async start(): Promise<void> {
     if (this.#starting) return this.#starting

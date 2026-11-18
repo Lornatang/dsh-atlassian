@@ -29,6 +29,7 @@ interface OperationContext {
   refreshExpected?: OAuthTokens
   releaseRefresh?: () => void
   lease?: SessionLease
+  exchangePending?: boolean
 }
 
 async function waitForFlight(flight: Promise<void>, signal: AbortSignal): Promise<void> {
@@ -78,11 +79,14 @@ export class AtlassianBridge {
   #flight?: { owner: OperationContext; done: Promise<void> }
   readonly #refreshes = new Set<Promise<Response>>()
   readonly #waiters = new Set<() => void>()
+  #waiting = false
+  readonly #allowLoopbackHttp: boolean
 
   constructor(host: BridgeHost, options: BridgeOptions) {
     this.#host = host
     this.#options = options
     const network = createCloudFetch(new URL(options.url))
+    this.#allowLoopbackHttp = network.allowLoopbackHttp
     const active = (): boolean => {
       const operation = this.#operation.getStore()
       return !this.#disposed && (!operation || (operation.generation === this.#generation && !operation.signal.aborted))
@@ -133,10 +137,11 @@ export class AtlassianBridge {
           if (operation.releaseRefresh === release) operation.releaseRefresh = undefined
         }
         this.#flight = { owner: operation, done }
+        operation.exchangePending = true
         operation.lease = lease
         operation.releaseRefresh = release
         signal.addEventListener('abort', release, { once: true })
-        if (signal.aborted) { pending = false; release(); throw new Error('atlassian: connection cancelled') }
+        if (signal.aborted) { operation.exchangePending = false; pending = false; release(); throw new Error('atlassian: connection cancelled') }
         const exchange = (async (): Promise<Response> => {
           try {
             // A cancelled local request may still rotate its token remotely. Finish
@@ -158,6 +163,7 @@ export class AtlassianBridge {
             await this.#options.store.clearCredentialsIf(() => true, expected, lease, undefined, true, 'tokens')
             throw error
           } finally {
+            operation.exchangePending = false
             pending = false
             if (requested) release()
           }
@@ -182,6 +188,12 @@ export class AtlassianBridge {
       lease: () => this.#operation.getStore()?.lease,
       observedTokens: () => this.#operation.getStore()?.observedTokens,
       signal: () => this.#operation.getStore()?.signal,
+      resetObservation: () => {
+        const operation = this.#operation.getStore()
+        if (!operation) return
+        operation.observedTokens = undefined
+        operation.refreshExpected = undefined
+      },
     })
   }
 
@@ -213,7 +225,9 @@ export class AtlassianBridge {
         mismatch = new URL(raw.includes('://') ? raw : `https://${raw}`).host.toLowerCase() !== site.toLowerCase()
       } catch { mismatch = true }
     }
-    return { status: this.#status, authorizationUrl: this.#url, site, siteMismatch: mismatch, toolCount: this.#tools.size, error: this.#error }
+    // Only publish a URL while a callback wait is armed; following it otherwise
+    // would reach an unbound callback listener and fail with an HTTP 400.
+    return { status: this.#status, authorizationUrl: this.#waiting ? this.#url : undefined, site, siteMismatch: mismatch, toolCount: this.#tools.size, error: this.#error }
   }
   rawNames(): readonly string[] { return [...this.#tools.values()].map((value) => value.raw) }
   rawNameMatching(pattern: RegExp): string | undefined { return this.rawNames().find((name) => pattern.test(name)) }
@@ -245,6 +259,7 @@ export class AtlassianBridge {
   async authorize(): Promise<BridgeSnapshot> {
     await this.#boot
     if (this.#disposed || this.#status === 'ready') return this.snapshot()
+    if (!this.#callback.listening) await this.#callback.listen(this.#options.redirectPort)
     if (this.#status === 'authorizing' && this.#url) {
       if (this.#options.autoOpenBrowser) await openInBrowser(this.#url)
       return this.snapshot()
@@ -279,8 +294,10 @@ export class AtlassianBridge {
       check()
       this.#setStatus('connecting')
       this.#error = undefined
-      const client = new Client({ name: 'dsh-atlassian', version: '0.1.11' })
-      client.onerror = () => { this.#operation.getStore()?.releaseRefresh?.() }
+      const client = new Client({ name: 'dsh-atlassian', version: '0.1.12' })
+      // Releasing the session lease here would race the SDK's saveTokens; an
+      // exchange that is still in flight is released by its own finally block.
+      client.onerror = () => { const operation = this.#operation.getStore(); if (operation?.exchangePending) operation.releaseRefresh?.() }
       const transport = new StreamableHTTPClientTransport(new URL(this.#options.url), { authProvider: this.#provider, fetch: this.#fetch })
       const send = transport.send.bind(transport)
       transport.send = (message, options) => {
@@ -306,13 +323,16 @@ export class AtlassianBridge {
         if (!(error instanceof UnauthorizedError) || attempt !== 0) throw error
         const state = this.#url ? new URL(this.#url).searchParams.get('state') ?? undefined : undefined
         const waiting = this.#callback.waitForCode(this.#options.authorizationTimeoutMs, state)
+        this.#waiting = true
         this.#setStatus('authorizing')
         if (open && this.#url && this.#options.autoOpenBrowser) void openInBrowser(this.#url)
-        const callback = await waiting
-        check()
-        await this.#operation.run(this.#newOperation(), () => auth(this.#provider, { serverUrl: this.#options.url, authorizationCode: callback.code, fetchFn: this.#fetch }))
-        check()
-        await this.#options.store.clearCredentialsIf(() => !this.#disposed && generation === this.#generation, undefined, undefined, this.#controller.signal, false, 'codeVerifier')
+        try {
+          const callback = await waiting
+          check()
+          await this.#operation.run(this.#newOperation(), () => auth(this.#provider, { serverUrl: this.#options.url, authorizationCode: callback.code, fetchFn: this.#fetch }))
+          check()
+          await this.#options.store.clearCredentialsIf(() => !this.#disposed && generation === this.#generation, undefined, undefined, this.#controller.signal, false, 'codeVerifier')
+        } finally { this.#waiting = false }
         continue
       }
       this.#client = client
@@ -375,7 +395,9 @@ export class AtlassianBridge {
       const items: unknown = JSON.parse(display(result.content))
       const first = Array.isArray(items) ? items[0] : items
       if (first && typeof first === 'object' && typeof (first as Record<string, unknown>)['url'] === 'string') {
-        await this.#options.store.patch({ site: new URL((first as Record<string, string>)['url']!).host }, () => !this.#disposed && generation === this.#generation && !signal.aborted, undefined, undefined, signal)
+        const reported = new URL((first as Record<string, string>)['url']!)
+        secureUrl(reported, this.#allowLoopbackHttp)
+        await this.#options.store.patch({ site: reported.host }, () => !this.#disposed && generation === this.#generation && !signal.aborted, undefined, undefined, signal)
       }
     } catch { /* The connection can work without a site label. */ }
   }

@@ -24,3 +24,12 @@ test('connection settings reject unsafe URLs and require explicit HTTP consent',
   assert.throws(() => configureEndpoints(current, { ...defaults, jiraUrl: 'http://jira.example.test' }), /plaintext/)
   assert.equal(configureEndpoints(current, { ...defaults, jiraUrl: 'http://jira.example.test/', allowInsecureHttp: true }).server.jiraUrl, 'http://jira.example.test')
 })
+test('configuration schema rejects invalid server names and overflow timers', () => {
+  assert.throws(() => Config({ serverName: 'bad name!' }), /serverName|pattern|match/i)
+  assert.throws(() => Config({ serverName: 'x'.repeat(65) }), /serverName|pattern|match/i)
+  assert.throws(() => Config({ toolCallTimeoutMs: 2 ** 31 }), /toolCallTimeoutMs|max|2147483647/i)
+  assert.throws(() => Config({ authorizationTimeoutMs: 2 ** 31 }), /authorizationTimeoutMs|max|2147483647/i)
+  assert.equal(Config({ serverName: 'ok_name-1' }).serverName, 'ok_name-1')
+  assert.equal(Config({ toolCallTimeoutMs: 2 ** 31 - 1 }).toolCallTimeoutMs, 2 ** 31 - 1)
+})
+

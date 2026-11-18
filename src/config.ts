@@ -67,12 +67,12 @@ export function configureEndpoints(current: Config, input: Record<string, unknow
 
 export const Config = z.object({
   mode: z.union(['cloud', 'server']).default('cloud'),
-  serverName: z.string().default('atlassian'),
+  serverName: z.string().default('atlassian').pattern(/^[A-Za-z0-9_-]{1,64}$/),
   url: z.string().default(DEFAULT_CLOUD_URL),
   redirectPort: z.number().step(1).min(0).max(65535).default(3334),
-  toolCallTimeoutMs: z.number().step(1).min(1).default(60000),
+  toolCallTimeoutMs: z.number().step(1).min(1).max(2_147_483_647).default(60000),
   expectedSite: z.string().default(''),
-  authorizationTimeoutMs: z.number().step(1).min(1000).default(300000),
+  authorizationTimeoutMs: z.number().step(1).min(1000).max(2_147_483_647).default(300000),
   autoOpenBrowser: z.boolean().default(true),
   server: z.object({
     jiraUrl: z.string().default(''),

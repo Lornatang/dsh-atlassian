@@ -215,7 +215,13 @@ export class SessionStore {
     }, lease, signal)
   }
 
-  async clearCredentialsIf(active: () => boolean, expected: OAuthTokens | undefined, lease: SessionLease | undefined, signal: AbortSignal | undefined, guard: boolean, ...fields: readonly (keyof StoredSession)[]): Promise<void> {
+  /**
+   * Returns whether the guard matched and the credentials were actually cleared:
+   * a stale observation must keep refusing writes when another process removed
+   * the session first.
+   */
+  async clearCredentialsIf(active: () => boolean, expected: OAuthTokens | undefined, lease: SessionLease | undefined, signal: AbortSignal | undefined, guard: boolean, ...fields: readonly (keyof StoredSession)[]): Promise<boolean> {
+    let cleared = false
     await this.#withLease(async () => {
       if (!active()) throw new Error('atlassian: connection cancelled')
       if ((expected || guard) && !sameTokens(this.#value.tokens, expected)) return
@@ -223,7 +229,9 @@ export class SessionStore {
       for (const field of fields) if (field !== 'version') delete next[field]
       await this.#flush(next)
       this.#value = next
+      cleared = true
     }, lease, signal)
+    return cleared
   }
 
   async clear(...fields: readonly (keyof StoredSession)[]): Promise<void> {

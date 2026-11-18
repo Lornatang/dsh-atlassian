@@ -41,7 +41,12 @@ export declare class SessionStore {
     /** Re-register only when a new interactive flow needs a different callback. */
     rebindRedirect(actual: string, expected: OAuthTokens | undefined, active: () => boolean, lease?: SessionLease, signal?: AbortSignal): Promise<void>;
     saveTokens(tokens: OAuthTokens, active: () => boolean, expected?: OAuthTokens, lease?: SessionLease, signal?: AbortSignal, guard?: boolean): Promise<void>;
-    clearCredentialsIf(active: () => boolean, expected: OAuthTokens | undefined, lease: SessionLease | undefined, signal: AbortSignal | undefined, guard: boolean, ...fields: readonly (keyof StoredSession)[]): Promise<void>;
+    /**
+     * Returns whether the guard matched and the credentials were actually cleared:
+     * a stale observation must keep refusing writes when another process removed
+     * the session first.
+     */
+    clearCredentialsIf(active: () => boolean, expected: OAuthTokens | undefined, lease: SessionLease | undefined, signal: AbortSignal | undefined, guard: boolean, ...fields: readonly (keyof StoredSession)[]): Promise<boolean>;
     clear(...fields: readonly (keyof StoredSession)[]): Promise<void>;
     destroy(): Promise<void>;
 }
