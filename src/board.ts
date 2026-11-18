@@ -40,7 +40,6 @@ export class JiraBoard {
   #resource?: { epoch: number; id: string; base: string; site: string }
   #pending?: { epoch: number; promise: Promise<string> }
   constructor(bridge: ToolBridge) { this.#bridge = bridge }
-  available(): boolean { return !!this.#bridge.rawNameMatching(/searchJiraIssuesUsingJql/i) }
   get site(): string | undefined { return this.#resource?.epoch === (this.#bridge.epoch?.() ?? 0) ? this.#resource.site : undefined }
 
   async #call(pattern: RegExp, args: Record<string, unknown>, timeoutMs?: number): Promise<unknown> {

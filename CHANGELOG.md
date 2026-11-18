@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.13 - 2026-11-19
+
+- Remove a duplicated request-target pre-check left over from the route hardening; malformed URLs still receive the same 400 response.
+- Share one loopback-host predicate between the OAuth callback and the browser helper instead of two copies.
+- Drop the unused OAuth provider logger option, the unused board availability helper and a redundant board options type.
+
 ## 0.1.12 - 2026-11-18
 
 - Re-arm the OAuth callback listener when authorization starts, so a callback port that becomes available after a failed bind no longer leaves the published redirect URI pointing at port 0.

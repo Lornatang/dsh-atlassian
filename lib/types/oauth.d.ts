@@ -13,6 +13,8 @@ export interface AuthorizationCallback {
 }
 export declare class RedirectRegistrationChanged extends Error {
 }
+/** Loopback hosts may use plain HTTP for local MCP and OAuth endpoints. */
+export declare function isLoopbackHost(hostname: string): boolean;
 export declare function secureUrl(url: URL, allowLoopbackHttp: boolean): void;
 /** Restrict every discovered OAuth and MCP endpoint, including redirect targets. */
 export declare function createCloudFetch(serverUrl: URL): {
@@ -35,7 +37,6 @@ export declare class AtlassianOAuthProvider implements OAuthClientProvider {
         redirectUri: () => string;
         onAuthorizationUrl: (url: string) => void;
         allowLoopbackHttp: boolean;
-        logger: Logger;
         active?: () => boolean;
         tokenRead?: (tokens: OAuthTokens | undefined) => void;
         refreshExpected?: () => OAuthTokens | undefined;

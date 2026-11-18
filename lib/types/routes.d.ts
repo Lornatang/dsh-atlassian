@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { BridgeSnapshot } from './bridge.js';
+import type { BoardConfig } from './config.js';
 import { type JiraBoard, type ToolBridge } from './board.js';
 export declare const ROUTE_PREFIX = "/plugins/atlassian";
 export interface RouteRegistrar {
@@ -11,12 +12,6 @@ export interface RouteRegistrar {
 }
 export interface RequestFence {
     requestRejection(req: IncomingMessage): number | undefined;
-}
-export interface BoardRouteOptions {
-    jql: string;
-    limit: number;
-    timeoutMs: number;
-    promptTemplate: string;
 }
 export interface EditableConnection {
     snapshot(): {
@@ -36,4 +31,4 @@ export interface PluginBridge extends ToolBridge {
     start(): Promise<void>;
     dispose(): Promise<void>;
 }
-export declare function registerRoutes(web: RouteRegistrar, bridge: PluginBridge, board: JiraBoard, options: BoardRouteOptions, fence: RequestFence | undefined, connection?: EditableConnection): () => void;
+export declare function registerRoutes(web: RouteRegistrar, bridge: PluginBridge, board: JiraBoard, options: BoardConfig, fence: RequestFence | undefined, connection?: EditableConnection): () => void;

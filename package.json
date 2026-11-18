@@ -1,6 +1,6 @@
 {
   "name": "@lornatang/dsh-atlassian",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Connect Atlassian Cloud or self-hosted Jira and Confluence to DeepSeek Harness with tools and a Jira board.",
   "keywords": [
     "deepseek-harness",

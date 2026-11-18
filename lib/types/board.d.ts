@@ -63,7 +63,6 @@ export declare class BoardError extends Error {
 export declare class JiraBoard {
     #private;
     constructor(bridge: ToolBridge);
-    available(): boolean;
     get site(): string | undefined;
     cloudId(): Promise<string>;
     load(query: BoardQuery): Promise<BoardPayload>;

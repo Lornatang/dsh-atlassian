@@ -1,11 +1,11 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { BridgeSnapshot } from './bridge.js'
+import type { BoardConfig } from './config.js'
 import { BoardError, type JiraBoard, type ToolBridge } from './board.js'
 
 export const ROUTE_PREFIX = '/plugins/atlassian'
 export interface RouteRegistrar { register(route: { kind: 'exact' | 'prefix'; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }): () => void }
 export interface RequestFence { requestRejection(req: IncomingMessage): number | undefined }
-export interface BoardRouteOptions { jql: string; limit: number; timeoutMs: number; promptTemplate: string }
 export interface EditableConnection {
   snapshot(): { jiraUrl: string; confluenceUrl: string; jiraCaFile: string; confluenceCaFile: string; allowInsecureHttp: boolean }
   update(input: Record<string, unknown>): Promise<void>
@@ -54,21 +54,14 @@ function required(input: Record<string, unknown>, key: string): string {
   return value
 }
 
-export function registerRoutes(web: RouteRegistrar, bridge: PluginBridge, board: JiraBoard, options: BoardRouteOptions, fence: RequestFence | undefined, connection?: EditableConnection): () => void {
+export function registerRoutes(web: RouteRegistrar, bridge: PluginBridge, board: JiraBoard, options: BoardConfig, fence: RequestFence | undefined, connection?: EditableConnection): () => void {
   return web.register({ kind: 'prefix', path: ROUTE_PREFIX, handler: async (req, res) => {
-    if (!fence) { respond(res, 503, { ok: false, error: 'DSH connection service is unavailable' }); return }
-    const rejection = fence.requestRejection(req)
-    if (rejection !== undefined) { res.writeHead(rejection).end(); return }
-    let url: URL
-    try { url = new URL(req.url ?? '/', 'http://localhost') } catch { respond(res, 400, { ok: false, code: 'bad-request', error: 'Invalid request URL' }); return }
-    const action = url.pathname.slice(ROUTE_PREFIX.length).replace(/^\//, '')
-    const method = req.method ?? 'GET'
     try {
       if (!fence) { respond(res, 503, { ok: false, error: 'DSH connection service is unavailable' }); return }
       const rejection = fence.requestRejection(req)
       if (rejection !== undefined) { res.writeHead(rejection).end(); return }
       let url: URL
-      try { url = new URL(req.url ?? '/', 'http://localhost') } catch { respond(res, 400, { ok: false, error: 'invalid request target' }); return }
+      try { url = new URL(req.url ?? '/', 'http://localhost') } catch { respond(res, 400, { ok: false, error: 'Invalid request URL' }); return }
       const action = url.pathname.slice(ROUTE_PREFIX.length).replace(/^\//, '')
       const method = req.method ?? 'GET'
       if (method === 'GET' && action === 'status') {

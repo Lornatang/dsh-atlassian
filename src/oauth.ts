@@ -76,19 +76,20 @@ function limitCloudResponse(response: Response, allowEvents: boolean): Response 
   return limited
 }
 
-function isLoopback(url: URL): boolean {
-  return ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
+/** Loopback hosts may use plain HTTP for local MCP and OAuth endpoints. */
+export function isLoopbackHost(hostname: string): boolean {
+  return ['localhost', '127.0.0.1', '[::1]'].includes(hostname)
 }
 
 export function secureUrl(url: URL, allowLoopbackHttp: boolean): void {
-  if (url.username || url.password || (url.protocol !== 'https:' && !(allowLoopbackHttp && url.protocol === 'http:' && isLoopback(url)))) {
+  if (url.username || url.password || (url.protocol !== 'https:' && !(allowLoopbackHttp && url.protocol === 'http:' && isLoopbackHost(url.hostname)))) {
     throw new Error('Cloud and OAuth endpoints must use HTTPS without embedded credentials')
   }
 }
 
 /** Restrict every discovered OAuth and MCP endpoint, including redirect targets. */
 export function createCloudFetch(serverUrl: URL): { fetch: FetchLike; allowLoopbackHttp: boolean } {
-  const allowLoopbackHttp = serverUrl.protocol === 'http:' && isLoopback(serverUrl)
+  const allowLoopbackHttp = serverUrl.protocol === 'http:' && isLoopbackHost(serverUrl.hostname)
   secureUrl(serverUrl, allowLoopbackHttp)
   return {
     allowLoopbackHttp,
@@ -214,7 +215,7 @@ export class AtlassianOAuthProvider implements OAuthClientProvider {
   readonly #signal: () => AbortSignal | undefined
   readonly #resetObservation: () => void
 
-  constructor(options: { store: SessionStore; redirectUri: () => string; onAuthorizationUrl: (url: string) => void; allowLoopbackHttp: boolean; logger: Logger; active?: () => boolean; tokenRead?: (tokens: OAuthTokens | undefined) => void; refreshExpected?: () => OAuthTokens | undefined; authFinished?: () => void; lease?: () => SessionLease | undefined; observedTokens?: () => OAuthTokens | undefined; signal?: () => AbortSignal | undefined; resetObservation?: () => void }) {
+  constructor(options: { store: SessionStore; redirectUri: () => string; onAuthorizationUrl: (url: string) => void; allowLoopbackHttp: boolean; active?: () => boolean; tokenRead?: (tokens: OAuthTokens | undefined) => void; refreshExpected?: () => OAuthTokens | undefined; authFinished?: () => void; lease?: () => SessionLease | undefined; observedTokens?: () => OAuthTokens | undefined; signal?: () => AbortSignal | undefined; resetObservation?: () => void }) {
     this.#store = options.store
     this.#redirect = options.redirectUri
     this.#onUrl = options.onAuthorizationUrl

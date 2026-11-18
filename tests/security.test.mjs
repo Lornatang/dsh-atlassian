@@ -21,7 +21,7 @@ test('Cloud OAuth never sends credentials to insecure discovered endpoints', asy
   await assert.rejects(local.fetch('http://example.test/token'), /must use HTTPS/)
   const provider = new AtlassianOAuthProvider({
     store: {}, redirectUri: () => 'http://127.0.0.1:3000/callback',
-    onAuthorizationUrl() {}, allowLoopbackHttp: false, logger: { info() {}, warn() {}, error() {} },
+    onAuthorizationUrl() {}, allowLoopbackHttp: false,
   })
   assert.throws(() => provider.redirectToAuthorization(new URL('http://127.0.0.1/authorize')), /must use HTTPS/)
   assert.throws(() => provider.redirectToAuthorization(new URL('https://user:secret@example.test/authorize')), /must use HTTPS/)
@@ -166,7 +166,6 @@ test('a successful token invalidation resets the stale observation so reauthoriz
       redirectUri: () => store.current.redirectUri,
       onAuthorizationUrl() {},
       allowLoopbackHttp: false,
-      logger: { info() {}, warn() {}, error() {} },
       active: () => true,
       observedTokens: () => observed,
       refreshExpected: () => undefined,
