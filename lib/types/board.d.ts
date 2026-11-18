@@ -7,6 +7,13 @@ export interface ToolBridge {
     };
     /** Changes whenever the connection is replaced, so cached site data can be invalidated. */
     epoch?(): number;
+    /** Site resolved while connecting, so the first board render need not repeat that MCP call. */
+    resource?(): {
+        epoch: number;
+        id: string;
+        base: string;
+        site: string;
+    } | undefined;
 }
 export interface BoardStatus {
     name: string;

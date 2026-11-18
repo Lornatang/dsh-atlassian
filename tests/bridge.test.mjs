@@ -529,7 +529,8 @@ test('a reconnect invalidates the cached board site and resolves it again', asyn
     await bridge.start()
     await waitFor(() => bridge.snapshot().status === 'ready')
     assert.equal(await board.cloudId(), 'mock-cloud-id')
-    assert.equal(resourceCalls(), before + 2, 'the bridge and the board each resolve the site again')
+    // The connect-time resolution is shared with the board: no second MCP call.
+    assert.equal(resourceCalls(), before + 1, 'the board reuses the site resolved while reconnecting')
     assert.equal(board.site, 'example.atlassian.net')
   } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
 })

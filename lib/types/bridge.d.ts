@@ -37,6 +37,13 @@ export declare class AtlassianBridge {
     #private;
     constructor(host: BridgeHost, options: BridgeOptions);
     epoch(): number;
+    /** Site resolved during connect, shared with the board to avoid a duplicate MCP call. */
+    resource(): {
+        epoch: number;
+        id: string;
+        base: string;
+        site: string;
+    } | undefined;
     snapshot(): BridgeSnapshot;
     rawNames(): readonly string[];
     rawNameMatching(pattern: RegExp): string | undefined;

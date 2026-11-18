@@ -80,6 +80,7 @@ export class AtlassianBridge {
   readonly #refreshes = new Set<Promise<Response>>()
   readonly #waiters = new Set<() => void>()
   #waiting = false
+  #resource?: { epoch: number; id: string; base: string; site: string }
   readonly #allowLoopbackHttp: boolean
 
   constructor(host: BridgeHost, options: BridgeOptions) {
@@ -201,6 +202,11 @@ export class AtlassianBridge {
 
   epoch(): number { return this.#generation }
 
+  /** Site resolved during connect, shared with the board to avoid a duplicate MCP call. */
+  resource(): { epoch: number; id: string; base: string; site: string } | undefined {
+    return this.#resource?.epoch === this.#generation ? this.#resource : undefined
+  }
+
   #setStatus(status: BridgeStatus): void { this.#status = status; this.#wake() }
   #setUrl(url: string | undefined): void { this.#url = url; this.#wake() }
   #wake(): void { const waiters = [...this.#waiters]; this.#waiters.clear(); for (const wake of waiters) wake() }
@@ -294,7 +300,7 @@ export class AtlassianBridge {
       check()
       this.#setStatus('connecting')
       this.#error = undefined
-      const client = new Client({ name: 'dsh-atlassian', version: '0.1.13' })
+      const client = new Client({ name: 'dsh-atlassian', version: '0.1.14' })
       // Releasing the session lease here would race the SDK's saveTokens; an
       // exchange that is still in flight is released by its own finally block.
       client.onerror = () => { const operation = this.#operation.getStore(); if (operation?.exchangePending) operation.releaseRefresh?.() }
@@ -393,11 +399,32 @@ export class AtlassianBridge {
     try {
       const result = await client.callTool({ name, arguments: {} }, undefined, { timeout: 20000, signal })
       const items: unknown = JSON.parse(display(result.content))
-      const first = Array.isArray(items) ? items[0] : items
+      const list = Array.isArray(items) ? items : [items]
+      // Publish the first safe site label for the status snapshot. The board's
+      // stricter URL policy decides which entry can act as its cloud resource.
+      const first = list[0]
       if (first && typeof first === 'object' && typeof (first as Record<string, unknown>)['url'] === 'string') {
-        const reported = new URL((first as Record<string, string>)['url']!)
-        secureUrl(reported, this.#allowLoopbackHttp)
-        await this.#options.store.patch({ site: reported.host }, () => !this.#disposed && generation === this.#generation && !signal.aborted, undefined, undefined, signal)
+        try {
+          const reported = new URL((first as Record<string, string>)['url']!)
+          secureUrl(reported, this.#allowLoopbackHttp)
+          await this.#options.store.patch({ site: reported.host }, () => !this.#disposed && generation === this.#generation && !signal.aborted, undefined, undefined, signal)
+        } catch { /* The status label is optional; the board still validates URLs itself. */ }
+      }
+      for (const item of list) {
+        if (!item || typeof item !== 'object') continue
+        const entry = item as Record<string, unknown>
+        const id = entry['id']
+        const url = entry['url']
+        if (typeof id !== 'string' || !id || typeof url !== 'string' || !url) continue
+        let parsed: URL
+        try {
+          parsed = new URL(url)
+          if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) continue
+        } catch { continue }
+        if (!this.#disposed && generation === this.#generation && !signal.aborted) {
+          this.#resource = { epoch: generation, id, base: `${parsed.origin}${parsed.pathname.replace(/\/$/, '')}`, site: parsed.host }
+        }
+        break
       }
     } catch { /* The connection can work without a site label. */ }
   }
@@ -411,6 +438,7 @@ export class AtlassianBridge {
 
   async disconnect(): Promise<BridgeSnapshot> {
     this.#generation++
+    this.#resource = undefined
     this.#controller.abort()
     this.#controller = new AbortController()
     this.#setStatus('idle')
@@ -430,6 +458,7 @@ export class AtlassianBridge {
     if (this.#disposed) return
     this.#disposed = true
     this.#generation++
+    this.#resource = undefined
     this.#controller.abort()
     this.#setStatus('idle')
     this.#callback.cancelWait()

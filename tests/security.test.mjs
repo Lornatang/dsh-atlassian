@@ -151,6 +151,32 @@ test('Jira board refreshes its cached site when the bridge reconnects', async ()
   assert.equal(lookups, 2)
 })
 
+test('Jira board reuses the site resolved by the bridge while connecting', async () => {
+  let lookups = 0
+  let sharedEpoch = 3
+  const bridge = {
+    epoch: () => 3,
+    resource: () => sharedEpoch === 3
+      ? { epoch: 3, id: 'shared', base: 'https://shared.example.test', site: 'shared.example.test' }
+      : undefined,
+    rawNameMatching: () => 'getAccessibleAtlassianResources',
+    callTool: async () => {
+      lookups++
+      return [{ type: 'text', text: JSON.stringify([{ id: 'lookup', url: 'https://lookup.example.test' }]) }]
+    },
+  }
+  const board = new JiraBoard(bridge)
+  assert.equal(await board.cloudId(), 'shared')
+  assert.equal(board.site, 'shared.example.test')
+  assert.equal(await board.cloudId(), 'shared')
+  assert.equal(lookups, 0, 'the connect-time resolution needs no extra MCP call')
+  // A connect-time result from another generation must not be trusted.
+  sharedEpoch = 2
+  const stale = new JiraBoard(bridge)
+  assert.equal(await stale.cloudId(), 'lookup')
+  assert.equal(lookups, 1)
+})
+
 test('a successful token invalidation resets the stale observation so reauthorization can proceed', async () => {
   const root = await mkdtemp(join(tmpdir(), 'atlassian-reset-'))
   try {

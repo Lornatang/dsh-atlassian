@@ -4,6 +4,8 @@ export interface ToolBridge {
   snapshot?(): { status: string; error?: string | undefined }
   /** Changes whenever the connection is replaced, so cached site data can be invalidated. */
   epoch?(): number
+  /** Site resolved while connecting, so the first board render need not repeat that MCP call. */
+  resource?(): { epoch: number; id: string; base: string; site: string } | undefined
 }
 export interface BoardStatus { name: string; categoryKey: string; categoryName: string; colorName: string }
 export interface BoardIssue {
@@ -59,6 +61,13 @@ export class JiraBoard {
   async cloudId(): Promise<string> {
     const epoch = this.#bridge.epoch?.() ?? 0
     if (this.#resource?.epoch === epoch) return this.#resource.id
+    // The bridge resolves the same resource while connecting; reuse that result
+    // instead of paying a second MCP round-trip on the first board render.
+    const shared = this.#bridge.resource?.()
+    if (shared && shared.epoch === epoch) {
+      this.#resource = { epoch, id: shared.id, base: shared.base, site: shared.site }
+      return shared.id
+    }
     if (this.#pending?.epoch === epoch) return this.#pending.promise
     const promise = this.#resolveSite(epoch)
     this.#pending = { epoch, promise }
