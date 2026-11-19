@@ -232,7 +232,7 @@ export class AtlassianBridge {
   }
 
   snapshot(): BridgeSnapshot {
-    const site = this.#options.store.current.site
+    const site = this.resource()?.site
     let mismatch = false
     if (site && this.#options.expectedSite.trim()) {
       try {

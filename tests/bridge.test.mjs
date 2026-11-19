@@ -580,3 +580,30 @@ test('Cloud status and the board share the first valid resource from fenced JSON
     assert.equal(mock.calls.filter((call) => call.params?.name === 'getAccessibleAtlassianResources').length, 1)
   } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
 })
+
+test('Cloud status drops the previous site if reauthorization returns no valid resource', async () => {
+  const mock = await startMockMcp({ oauth: true, dropRefreshResponse: true })
+  const root = await mkdtemp(join(tmpdir(), 'atlassian-reauthorization-site-'))
+  const store = new SessionStore(join(root, 'session.json'))
+  const bridge = new AtlassianBridge({ logger, register() { return () => {} } }, {
+    serverName: 'atlassian', url: mock.url, redirectPort: 0, toolCallTimeoutMs: 5000,
+    expectedSite: 'expected.atlassian.net', authorizationTimeoutMs: 5000, autoOpenBrowser: false, store,
+  })
+  try {
+    await bridge.start()
+    assert.equal((await fetch(bridge.snapshot().authorizationUrl)).status, 200)
+    await waitFor(() => bridge.snapshot().status === 'ready')
+    assert.equal(bridge.snapshot().site, 'example.atlassian.net')
+    assert.equal(bridge.snapshot().siteMismatch, true)
+    mock.expire()
+    await assert.rejects(bridge.callTool('getJiraIssue', { issueIdOrKey: 'DEMO-1' }))
+    mock.setResourceText(JSON.stringify([{ id: 'invalid', url: 'http://invalid.atlassian.net' }]))
+    const authorizing = await bridge.authorize()
+    assert.equal(authorizing.site, undefined)
+    assert.equal((await fetch(authorizing.authorizationUrl)).status, 200)
+    await waitFor(() => bridge.snapshot().status === 'ready')
+    assert.equal(bridge.snapshot().site, undefined)
+    assert.equal(bridge.snapshot().siteMismatch, false)
+    await assert.rejects(new JiraBoard(bridge).cloudId(), { code: 'no-site' })
+  } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+})
