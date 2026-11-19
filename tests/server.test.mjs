@@ -147,6 +147,25 @@ test('self-signed TLS requires a specifically trusted certificate', async (t) =>
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('updating the self-hosted credentials invalidates the board resource', async () => {
+  const mock = await startMockServer()
+  const root = await mkdtemp(join(tmpdir(), 'atlassian-server-reconnect-'))
+  const bridge = new ServerBridge({ logger, register: () => () => {} }, {
+    serverName: 'atlassian', server: { jiraUrl: mock.jiraUrl, confluenceUrl: '', jiraCaFile: '', confluenceCaFile: '', allowInsecureHttp: true },
+    store: new SessionStore(join(root, 'session.json')), timeoutMs: 5000,
+  })
+  try {
+    const credentials = { jiraUsername: 'jira-user', jiraSecret: 'jira-password' }
+    assert.equal((await bridge.authorize(credentials)).status, 'ready')
+    const board = new JiraBoard(bridge)
+    assert.equal(await board.cloudId(), 'jira-server')
+    assert.equal((await bridge.authorize(credentials)).status, 'ready')
+    assert.equal(board.site, undefined)
+    assert.equal(await board.cloudId(), 'jira-server')
+    assert.equal(board.site, new URL(mock.jiraUrl).host)
+  } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+})
+
 test('Server REST clients reuse keep-alive connections until reconnect or disconnect', async () => {
   const mock = await startMockServer()
   const root = await mkdtemp(join(tmpdir(), 'atlassian-keepalive-'))

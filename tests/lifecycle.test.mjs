@@ -9,14 +9,14 @@ import { SessionStore, sessionFileFor } from '../lib/store.js'
 
 const logger = { info() {}, warn() {}, error() {} }
 
-function harness(patchPath, services) {
+function harness(patchPath, edit) {
   const cleanups = []
   const edits = []
   let handler
-  const registry = new Map(services)
+  const registry = new Map()
   registry.set('configEditor', {
     entries: () => [{ options: { id: 'atlassian' } }],
-    edit: async (entry, change) => { edits.push(change({}, undefined)) },
+    edit: edit ?? (async (entry, change) => { edits.push(change({}, undefined)) }),
   })
   registry.set('webServer', { register(route) { handler = route.handler; return () => {} } })
   registry.set('connection', { requestRejection: () => undefined })
@@ -42,7 +42,7 @@ test('switching endpoints destroys the credential file of the previous identity'
   const root = await mkdtemp(join(tmpdir(), 'atlassian-lifecycle-'))
   const patchPath = join(root, 'cordis.patch.yml')
   const oldFile = sessionFileFor('atlassian', 'server:\0', patchPath)
-  const h = harness(patchPath, [])
+  const h = harness(patchPath)
   try {
     apply(h.ctx, Config({ mode: 'server', serverName: 'atlassian', server: { jiraUrl: '', confluenceUrl: '' } }))
     await new SessionStore(oldFile).patch({ serverCredentials: { jira: { secret: 'old-secret' } } })
@@ -72,7 +72,7 @@ test('saving the same endpoints keeps the stored credentials', async () => {
   const patchPath = join(root, 'cordis.patch.yml')
   const identity = 'server:https://127.0.0.1:1\0'
   const file = sessionFileFor('atlassian', identity, patchPath)
-  const h = harness(patchPath, [])
+  const h = harness(patchPath)
   try {
     await new SessionStore(file).patch({ serverCredentials: { jira: { secret: 'kept-secret' } } })
     apply(h.ctx, Config({ mode: 'server', serverName: 'atlassian', server: { jiraUrl: 'https://127.0.0.1:1', confluenceUrl: '' } }))
@@ -88,6 +88,31 @@ test('saving the same endpoints keeps the stored credentials', async () => {
     await new Promise((resolve) => setTimeout(resolve, 100))
     const saved = JSON.parse(await readFile(file, 'utf8'))
     assert.equal(saved.serverCredentials.jira.secret, 'kept-secret')
+  } finally {
+    for (const cleanup of h.cleanups.reverse()) await cleanup()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a rejected configuration edit does not change the running settings', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'atlassian-lifecycle-rejected-'))
+  const patchPath = join(root, 'cordis.patch.yml')
+  const h = harness(patchPath, async (_entry, change) => {
+    change({}, undefined)
+    throw new Error('Profile is read-only')
+  })
+  try {
+    apply(h.ctx, Config({ mode: 'server' }))
+    await withServer(h.handler(), async (base) => {
+      const response = await fetch(`${base}/plugins/atlassian/configure`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ jiraUrl: 'https://new.example.test', confluenceUrl: '', jiraCaFile: '', confluenceCaFile: '', allowInsecureHttp: false }),
+      })
+      assert.equal(response.status, 500)
+      const status = await fetch(`${base}/plugins/atlassian/status`)
+      assert.equal((await status.json()).configuration.jiraUrl, '')
+    })
   } finally {
     for (const cleanup of h.cleanups.reverse()) await cleanup()
     await rm(root, { recursive: true, force: true })

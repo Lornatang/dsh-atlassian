@@ -1,7 +1,7 @@
 import { createServer } from 'node:http'
 import { createHash } from 'node:crypto'
 
-export async function startMockMcp({ initializeDelay = 0, resourceDelay = 0, oauth = false, tokenEndpoint, rotateRefresh = false, refreshDelay = 0, staleUnauthorizedDelay = 0, refreshErrorOnce = false, dropRefreshResponse = false, clientSecretBasic = false, serverEvents = false, strictRedirect = false } = {}) {
+export async function startMockMcp({ initializeDelay = 0, resourceDelay = 0, oauth = false, tokenEndpoint, rotateRefresh = false, refreshDelay = 0, staleUnauthorizedDelay = 0, refreshErrorOnce = false, dropRefreshResponse = false, clientSecretBasic = false, serverEvents = false, strictRedirect = false, failToolListOnce = false, resourceText } = {}) {
   const calls = []
   let origin
   let challenge
@@ -84,7 +84,13 @@ export async function startMockMcp({ initializeDelay = 0, resourceDelay = 0, oau
     if (message.method === 'initialize') {
       if (initializeDelay) await new Promise((resolve) => setTimeout(resolve, initializeDelay))
       result = { protocolVersion: message.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'test', version: '1' } }
-    } else if (message.method === 'tools/list') result = { tools: definitions }
+    } else if (message.method === 'tools/list') {
+      if (failToolListOnce) {
+        failToolListOnce = false
+        json({ jsonrpc: '2.0', id: message.id, error: { code: -32603, message: 'Tool list temporarily unavailable' } }); return
+      }
+      result = { tools: definitions }
+    }
     else if (message.method === 'tools/call') {
       let value
       if (message.params.name === 'getAccessibleAtlassianResources') {
@@ -93,11 +99,12 @@ export async function startMockMcp({ initializeDelay = 0, resourceDelay = 0, oau
       }
       else if (message.params.name === 'searchJiraIssuesUsingJql') value = { issues: [{ id: '1', key: 'DEMO-1', fields: { summary: 'Mock issue', project: { key: 'DEMO', name: 'Demo' }, status: { name: 'To Do', statusCategory: { key: 'new', name: 'To Do' } } } }], isLast: true }
       else value = { key: 'DEMO-1', fields: { summary: 'Mock issue' } }
-      result = { content: [{ type: 'text', text: JSON.stringify(value) }] }
+      const text = message.params.name === 'getAccessibleAtlassianResources' && resourceText !== undefined ? resourceText : JSON.stringify(value)
+      result = { content: [{ type: 'text', text }] }
     } else { res.writeHead(400).end(); return }
     if (!res.destroyed) res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }))
   })
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   origin = `http://127.0.0.1:${server.address().port}`
-  return { url: `${origin}/mcp`, calls, streams: () => streams.size, expire: () => { accessToken = 'refreshed-access-token'; for (const stream of streams) stream.end() }, revokeRefresh: () => { refreshToken = 'replacement-refresh' }, refreshes: () => refreshes, close: () => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve) }) }
+  return { url: `${origin}/mcp`, calls, setResourceText: (text) => { resourceText = text }, streams: () => streams.size, expire: () => { accessToken = 'refreshed-access-token'; for (const stream of streams) stream.end() }, revokeRefresh: () => { refreshToken = 'replacement-refresh' }, refreshes: () => refreshes, close: () => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve) }) }
 }

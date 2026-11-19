@@ -1,3 +1,5 @@
+import { decodeToolJson, selectJiraResource, type ConnectionResource } from './jira-resource.js'
+
 export interface ToolBridge {
   rawNameMatching(pattern: RegExp): string | undefined
   callTool(name: string, args: Record<string, unknown>, timeoutMs?: number): Promise<readonly unknown[]>
@@ -5,7 +7,8 @@ export interface ToolBridge {
   /** Changes whenever the connection is replaced, so cached site data can be invalidated. */
   epoch?(): number
   /** Site resolved while connecting, so the first board render need not repeat that MCP call. */
-  resource?(): { epoch: number; id: string; base: string; site: string } | undefined
+  resource?(): ConnectionResource | undefined
+  allowsHttpResource?(url: URL): boolean
 }
 export interface BoardStatus { name: string; categoryKey: string; categoryName: string; colorName: string }
 export interface BoardIssue {
@@ -39,12 +42,18 @@ function issue(value: unknown, base?: string): BoardIssue | undefined {
 
 export class JiraBoard {
   readonly #bridge: ToolBridge
-  #resource?: { epoch: number; id: string; base: string; site: string }
-  #pending?: { epoch: number; promise: Promise<string> }
+  #resource?: ConnectionResource
+  #pending?: { epoch: number; promise: Promise<ConnectionResource> }
   constructor(bridge: ToolBridge) { this.#bridge = bridge }
-  get site(): string | undefined { return this.#resource?.epoch === (this.#bridge.epoch?.() ?? 0) ? this.#resource.site : undefined }
+  get site(): string | undefined { return this.#resource?.epoch === this.#epoch() ? this.#resource.site : undefined }
 
-  async #call(pattern: RegExp, args: Record<string, unknown>, timeoutMs?: number): Promise<unknown> {
+  #epoch(): number { return this.#bridge.epoch?.() ?? 0 }
+  #checkEpoch(epoch: number): void {
+    if (this.#epoch() !== epoch) throw new BoardError('not-connected', 'Atlassian connection changed; retry the request')
+  }
+
+  async #call(pattern: RegExp, args: Record<string, unknown>, timeoutMs?: number, epoch?: number): Promise<unknown> {
+    if (epoch !== undefined) this.#checkEpoch(epoch)
     const name = this.#bridge.rawNameMatching(pattern)
     if (!name) {
       const state = this.#bridge.snapshot?.()
@@ -54,52 +63,44 @@ export class JiraBoard {
     let blocks: readonly unknown[]
     try { blocks = await this.#bridge.callTool(name, args, timeoutMs) }
     catch (error) { throw new BoardError('tool-failed', error instanceof Error ? error.message : String(error)) }
-    const raw = blocks.map((entry) => val(obj(entry)['text']) ?? '').join('\n').trim().replace(/^```[a-z]*\s*/i, '').replace(/```\s*$/, '')
-    try { return JSON.parse(raw) as unknown } catch { throw new BoardError('unparsable', 'Jira response is not valid JSON') }
+    try { return decodeToolJson(blocks) } catch { throw new BoardError('unparsable', 'Jira response is not valid JSON') }
   }
 
   async cloudId(): Promise<string> {
-    const epoch = this.#bridge.epoch?.() ?? 0
-    if (this.#resource?.epoch === epoch) return this.#resource.id
-    // The bridge resolves the same resource while connecting; reuse that result
-    // instead of paying a second MCP round-trip on the first board render.
+    const resource = await this.#getResource()
+    this.#checkEpoch(resource.epoch)
+    return resource.id
+  }
+
+  async #getResource(): Promise<ConnectionResource> {
+    const epoch = this.#epoch()
+    if (this.#resource?.epoch === epoch) return this.#resource
+    // The bridge may already have resolved the site while connecting.
     const shared = this.#bridge.resource?.()
-    if (shared && shared.epoch === epoch) {
-      this.#resource = { epoch, id: shared.id, base: shared.base, site: shared.site }
-      return shared.id
-    }
+    if (shared?.epoch === epoch) return this.#resource = shared
     if (this.#pending?.epoch === epoch) return this.#pending.promise
     const promise = this.#resolveSite(epoch)
     this.#pending = { epoch, promise }
     try { return await promise } finally { if (this.#pending?.promise === promise) this.#pending = undefined }
   }
 
-  async #resolveSite(epoch: number): Promise<string> {
+  async #resolveSite(epoch: number): Promise<ConnectionResource> {
     const data = await this.#call(/accessibleatlassianresources/i, {}, 20000)
-    const list = Array.isArray(data) ? data : [data]
-    for (const item of list) {
-      const entry = obj(item); const id = val(entry['id']); const url = val(entry['url'])
-      if (!id || !url) continue
-      try {
-        const parsed = new URL(url)
-        if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) continue
-        // A reconnect may have invalidated this resolution while it was in flight.
-        if ((this.#bridge.epoch?.() ?? 0) === epoch) this.#resource = { epoch, id, base: `${parsed.origin}${parsed.pathname.replace(/\/$/, '')}`, site: parsed.host }
-        return id
-      } catch { continue }
-    }
-    throw new BoardError('no-site', 'No accessible Jira site was found')
+    this.#checkEpoch(epoch)
+    const resource = selectJiraResource(data, (url) => this.#bridge.allowsHttpResource?.(url) ?? false)
+    if (!resource) throw new BoardError('no-site', 'No accessible Jira site was found')
+    return this.#resource = { epoch, ...resource }
   }
 
   async load(query: BoardQuery): Promise<BoardPayload> {
-    const id = await this.cloudId()
+    const { id, base, site, epoch } = await this.#getResource()
     const fallback = 'updated >= -180d ORDER BY updated DESC'
     let jql = query.jql?.trim() || fallback
     let retried = false
     let result: Obj
     for (;;) {
       try {
-        result = obj(await this.#call(/searchJiraIssuesUsingJql/i, { cloudId: id, jql, maxResults: query.limit, fields: ['summary', 'status', 'issuetype', 'priority', 'assignee', 'reporter', 'updated', 'project'] }, query.timeoutMs))
+        result = obj(await this.#call(/searchJiraIssuesUsingJql/i, { cloudId: id, jql, maxResults: query.limit, fields: ['summary', 'status', 'issuetype', 'priority', 'assignee', 'reporter', 'updated', 'project'] }, query.timeoutMs, epoch))
         break
       } catch (error) {
         if (!retried && jql !== fallback && /unbounded|unrestricted|add a search restriction/i.test(String(error))) { retried = true; jql = fallback; continue }
@@ -107,22 +108,22 @@ export class JiraBoard {
       }
     }
     const rows = Array.isArray(result['issues']) ? result['issues'] : []
-    const issues = rows.map((value) => issue(value, this.#resource?.base)).filter((value): value is BoardIssue => !!value)
-    return { issues, constrained: retried, jql, site: this.#resource?.site, cloudId: id, truncated: result['isLast'] === false, limit: query.limit }
+    const issues = rows.map((value) => issue(value, base)).filter((value): value is BoardIssue => !!value)
+    return { issues, constrained: retried, jql, site, cloudId: id, truncated: result['isLast'] === false, limit: query.limit }
   }
 
   async detail(key: string, timeoutMs: number): Promise<BoardIssueDetail> {
-    const id = await this.cloudId()
-    const data = obj(await this.#call(/^getJiraIssue$/i, { cloudId: id, issueIdOrKey: key, responseContentFormat: 'markdown' }, timeoutMs))
+    const { id, base, epoch } = await this.#getResource()
+    const data = obj(await this.#call(/^getJiraIssue$/i, { cloudId: id, issueIdOrKey: key, responseContentFormat: 'markdown' }, timeoutMs, epoch))
     const row = Array.isArray(data['issues']) ? data['issues'][0] : data
-    const found = issue(row, this.#resource?.base)
+    const found = issue(row, base)
     if (!found) throw new BoardError('not-found', `Issue ${key} was not found`)
     return { issue: found, description: val(obj(obj(row)['fields'])['description']) ?? '' }
   }
 
   async transitions(key: string, timeoutMs: number): Promise<readonly BoardTransition[]> {
-    const id = await this.cloudId()
-    const data = obj(await this.#call(/getTransitionsForJiraIssue/i, { cloudId: id, issueIdOrKey: key }, timeoutMs))
+    const { id, epoch } = await this.#getResource()
+    const data = obj(await this.#call(/getTransitionsForJiraIssue/i, { cloudId: id, issueIdOrKey: key }, timeoutMs, epoch))
     const rows = Array.isArray(data['transitions']) ? data['transitions'] : []
     return rows.map((raw) => {
       const row = obj(raw); const target = obj(row['to']); const category = obj(target['statusCategory'])
@@ -131,10 +132,12 @@ export class JiraBoard {
   }
 
   async transition(key: string, transitionId: string, timeoutMs: number): Promise<void> {
-    await this.#call(/^transitionJiraIssue$/i, { cloudId: await this.cloudId(), issueIdOrKey: key, transition: { id: transitionId } }, timeoutMs)
+    const { id, epoch } = await this.#getResource()
+    await this.#call(/^transitionJiraIssue$/i, { cloudId: id, issueIdOrKey: key, transition: { id: transitionId } }, timeoutMs, epoch)
   }
   async projects(timeoutMs: number): Promise<readonly BoardProject[]> {
-    const data = await this.#call(/getVisibleJiraProjects/i, { cloudId: await this.cloudId() }, timeoutMs)
+    const { id, epoch } = await this.#getResource()
+    const data = await this.#call(/getVisibleJiraProjects/i, { cloudId: id }, timeoutMs, epoch)
     const rows = Array.isArray(data) ? data : Array.isArray(obj(data)['values']) ? obj(data)['values'] as unknown[] : []
     return rows.map((raw) => { const row = obj(raw); return { key: val(row['key']) ?? '', name: val(row['name']) ?? val(row['key']) ?? '' } }).filter((row) => row.key).sort((a, b) => a.key.localeCompare(b.key))
   }

@@ -92,6 +92,7 @@ export class ServerBridge {
   }
 
   epoch(): number { return this.#generation }
+  allowsHttpResource(): boolean { return this.#config.allowInsecureHttp }
   rawNames(): readonly string[] { return [...this.#operations.keys()] }
   rawNameMatching(pattern: RegExp): string | undefined { return this.rawNames().find((name) => pattern.test(name)) }
 
@@ -102,7 +103,7 @@ export class ServerBridge {
       await this.#store.load()
       if (this.#disposed || generation !== this.#generation) return
       this.#credentials = this.#store.current.serverCredentials ?? {}
-      if (this.#credentials.jira || this.#credentials.confluence) await this.#begin({}, generation)
+      if (this.#credentials.jira || this.#credentials.confluence) await this.#begin({})
     })()
     try { await this.#starting } finally { this.#starting = undefined }
   }
@@ -110,12 +111,13 @@ export class ServerBridge {
   async authorize(input: Args = {}): Promise<BridgeSnapshot> {
     await this.#starting
     if (this.#disposed) return this.snapshot()
-    if (!this.#running) await this.#begin(input, this.#generation)
+    if (!this.#running) await this.#begin(input)
     else await this.#running
     return this.snapshot()
   }
 
-  async #begin(input: Args, generation: number): Promise<void> {
+  async #begin(input: Args): Promise<void> {
+    const generation = ++this.#generation
     this.#status = 'connecting'
     this.#error = undefined
     const run = this.#connect(input, generation).catch((error: unknown) => {

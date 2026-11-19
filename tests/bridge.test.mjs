@@ -155,6 +155,8 @@ test('a lost refresh response is not retried with a possibly rotated token', asy
     await waitFor(() => bridge.snapshot().status === 'authorizing')
     await fetch(bridge.snapshot().authorizationUrl)
     await waitFor(() => bridge.snapshot().status === 'ready')
+    const board = new JiraBoard(bridge)
+    assert.equal(await board.cloudId(), 'mock-cloud-id')
     const saved = JSON.parse(await readFile(file, 'utf8'))
     child = childBridge(mock.url, file, Number(new URL(saved.redirectUri).port))
     assert.equal((await child.send('start')).status, 'ready')
@@ -164,11 +166,15 @@ test('a lost refresh response is not retried with a possibly rotated token', asy
     assert.equal(mock.refreshes(), 1)
     assert.equal(JSON.parse(await readFile(file, 'utf8')).tokens, undefined)
     assert.equal(bridge.snapshot().status, 'error')
+    mock.setResourceText(JSON.stringify([{ id: 'reauthorized', url: 'https://reauthorized.atlassian.net/jira' }]))
     await bridge.authorize()
+    assert.equal(board.site, undefined)
     await waitFor(() => bridge.snapshot().status === 'authorizing')
     assert.equal((await fetch(bridge.snapshot().authorizationUrl)).status, 200)
     await waitFor(() => bridge.snapshot().status === 'ready')
-    await bridge.callTool('getJiraIssue', { issueIdOrKey: 'DEMO-1' })
+    const boardResult = await board.load({ limit: 10, timeoutMs: 5000 })
+    assert.equal(boardResult.cloudId, 'reauthorized')
+    assert.equal(boardResult.issues[0].url, 'https://reauthorized.atlassian.net/jira/browse/DEMO-1')
   } finally {
     if (child) { await child.send('dispose').catch(() => {}); await child.kill() }
     await bridge.dispose()
@@ -532,5 +538,45 @@ test('a reconnect invalidates the cached board site and resolves it again', asyn
     // The connect-time resolution is shared with the board: no second MCP call.
     assert.equal(resourceCalls(), before + 1, 'the board reuses the site resolved while reconnecting')
     assert.equal(board.site, 'example.atlassian.net')
+  } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+
+test('concurrent connection retries share one initialization', async () => {
+  const mock = await startMockMcp({ failToolListOnce: true })
+  const root = await mkdtemp(join(tmpdir(), 'atlassian-single-flight-'))
+  const bridge = new AtlassianBridge({ logger, register() { return () => {} } }, {
+    serverName: 'atlassian', url: mock.url, redirectPort: 0, toolCallTimeoutMs: 5000,
+    expectedSite: '', authorizationTimeoutMs: 5000, autoOpenBrowser: false, store: new SessionStore(join(root, 'session.json')),
+  })
+  try {
+    await bridge.start()
+    assert.equal(bridge.snapshot().status, 'error')
+    const retries = await Promise.all([bridge.authorize(), bridge.authorize()])
+    assert.deepEqual(retries.map((result) => result.status), ['ready', 'ready'])
+    assert.equal(mock.calls.filter((call) => call.method === 'initialize').length, 2)
+  } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('Cloud status and the board share the first valid resource from fenced JSON', async () => {
+  const resources = [
+    { id: ' ', url: 'https://missing-id.atlassian.net' },
+    { id: 'plaintext', url: 'http://plain.atlassian.net' },
+    { id: 'jira', url: 'https://jira.atlassian.net/jira/' },
+  ]
+  const mock = await startMockMcp({ resourceText: '```json\n' + JSON.stringify(resources) + '\n```' })
+  const root = await mkdtemp(join(tmpdir(), 'atlassian-resource-format-'))
+  const bridge = new AtlassianBridge({ logger, register() { return () => {} } }, {
+    serverName: 'atlassian', url: mock.url, redirectPort: 0, toolCallTimeoutMs: 5000,
+    expectedSite: 'jira.atlassian.net', authorizationTimeoutMs: 5000, autoOpenBrowser: false, store: new SessionStore(join(root, 'session.json')),
+  })
+  try {
+    await bridge.start()
+    const board = await new JiraBoard(bridge).load({ limit: 10, timeoutMs: 5000 })
+    assert.equal(board.cloudId, 'jira')
+    assert.equal(board.issues[0].url, 'https://jira.atlassian.net/jira/browse/DEMO-1')
+    assert.equal(bridge.snapshot().site, 'jira.atlassian.net')
+    assert.equal(bridge.snapshot().siteMismatch, false)
+    assert.equal(mock.calls.filter((call) => call.params?.name === 'getAccessibleAtlassianResources').length, 1)
   } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
 })

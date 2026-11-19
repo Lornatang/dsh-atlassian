@@ -1,3 +1,4 @@
+import { type ConnectionResource } from './jira-resource.js';
 export interface ToolBridge {
     rawNameMatching(pattern: RegExp): string | undefined;
     callTool(name: string, args: Record<string, unknown>, timeoutMs?: number): Promise<readonly unknown[]>;
@@ -8,12 +9,8 @@ export interface ToolBridge {
     /** Changes whenever the connection is replaced, so cached site data can be invalidated. */
     epoch?(): number;
     /** Site resolved while connecting, so the first board render need not repeat that MCP call. */
-    resource?(): {
-        epoch: number;
-        id: string;
-        base: string;
-        site: string;
-    } | undefined;
+    resource?(): ConnectionResource | undefined;
+    allowsHttpResource?(url: URL): boolean;
 }
 export interface BoardStatus {
     name: string;

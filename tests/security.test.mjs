@@ -342,3 +342,61 @@ test('HTTP routes reject malformed encodings instead of failing with a server er
     assert.equal(boardCalls, 0, 'malformed requests must not reach the board')
   } finally { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)) }
 })
+
+test('an in-flight board response keeps its original site and issue links after reconnect', async () => {
+  let epoch = 1
+  const { promise: searchStarted, resolve: startSearch } = Promise.withResolvers()
+  const { promise: searchFinished, resolve: finishSearch } = Promise.withResolvers()
+  const bridge = {
+    epoch: () => epoch,
+    rawNameMatching: (pattern) => ['getAccessibleAtlassianResources', 'searchJiraIssuesUsingJql'].find((name) => pattern.test(name)),
+    callTool: async (name, args) => {
+      if (name === 'getAccessibleAtlassianResources') {
+        return [{ type: 'text', text: epoch === 1 ? '{"id":"first","url":"https://first.example.test/jira"}' : '{"id":"second","url":"https://second.example.test"}' }]
+      }
+      assert.equal(args.cloudId, 'first')
+      startSearch()
+      await searchFinished
+      return [{ type: 'text', text: '{"issues":[{"key":"DEMO-1","fields":{"summary":"Old issue"}}]}' }]
+    },
+  }
+  const board = new JiraBoard(bridge)
+  const pending = board.load({ limit: 10, timeoutMs: 1000 })
+  await searchStarted
+  epoch = 2
+  assert.equal(await board.cloudId(), 'second')
+  finishSearch()
+  const loaded = await pending
+  assert.equal(loaded.cloudId, 'first')
+  assert.equal(loaded.site, 'first.example.test')
+  assert.equal(loaded.issues[0].url, 'https://first.example.test/jira/browse/DEMO-1')
+})
+
+test('a board lookup started before reconnect cannot send its old ID to the new connection', async () => {
+  let epoch = 1
+  const { promise: lookupStarted, resolve: startLookup } = Promise.withResolvers()
+  const { promise: lookupFinished, resolve: finishLookup } = Promise.withResolvers()
+  const bridge = {
+    epoch: () => epoch,
+    rawNameMatching: (pattern) => ['getAccessibleAtlassianResources', 'getJiraIssue'].find((name) => pattern.test(name)),
+    callTool: async (name, args) => {
+      if (name === 'getAccessibleAtlassianResources') {
+        if (epoch === 1) {
+          startLookup()
+          await lookupFinished
+          return [{ type: 'text', text: '{"id":"first","url":"https://first.example.test"}' }]
+        }
+        return [{ type: 'text', text: '{"id":"second","url":"https://second.example.test"}' }]
+      }
+      assert.equal(args.cloudId, 'second')
+      return [{ type: 'text', text: '{"key":"DEMO-1","fields":{"summary":"New issue"}}' }]
+    },
+  }
+  const board = new JiraBoard(bridge)
+  const pending = board.detail('DEMO-1', 1000)
+  await lookupStarted
+  epoch = 2
+  finishLookup()
+  await assert.rejects(pending, { code: 'not-connected' })
+  assert.equal((await board.detail('DEMO-1', 1000)).issue.url, 'https://second.example.test/browse/DEMO-1')
+})

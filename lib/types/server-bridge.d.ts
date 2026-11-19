@@ -13,6 +13,7 @@ export declare class ServerBridge {
     });
     snapshot(): BridgeSnapshot;
     epoch(): number;
+    allowsHttpResource(): boolean;
     rawNames(): readonly string[];
     rawNameMatching(pattern: RegExp): string | undefined;
     start(): Promise<void>;

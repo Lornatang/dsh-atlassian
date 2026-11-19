@@ -37,11 +37,12 @@ export function apply(ctx: Context, config: Settings): void {
   const connection: EditableConnection = {
     snapshot: () => ({ ...config.server }),
     update: async (input) => {
-      const next = Object.assign(config, configureEndpoints(config, input))
+      const next = configureEndpoints(config, input)
       const editor = scope.get('configEditor') as ConfigEditor | undefined
       const entry = editor?.entries().find((candidate) => candidate.options.id === 'atlassian')
       if (!editor || !entry) throw new Error('DSH configuration editor is unavailable')
       await editor.edit(entry, (current) => configureEndpoints(Config(current as Parameters<typeof Config>[0]), input))
+      Object.assign(config, next)
       if (identityFor(next) !== identity) {
         // The profile now points at a different endpoint; leave no credentials behind for the old one.
         void store.destroy().catch((error: unknown) => ctx.logger.warn(`atlassian: ${String(error)}`))

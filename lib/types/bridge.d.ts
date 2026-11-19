@@ -1,5 +1,6 @@
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
 import { type Logger } from './oauth.js';
+import { type ConnectionResource } from './jira-resource.js';
 import { type SessionStore } from './store.js';
 export interface BridgeHost {
     register(definition: ToolDefinition): () => void;
@@ -38,12 +39,8 @@ export declare class AtlassianBridge {
     constructor(host: BridgeHost, options: BridgeOptions);
     epoch(): number;
     /** Site resolved during connect, shared with the board to avoid a duplicate MCP call. */
-    resource(): {
-        epoch: number;
-        id: string;
-        base: string;
-        site: string;
-    } | undefined;
+    resource(): ConnectionResource | undefined;
+    allowsHttpResource(url: URL): boolean;
     snapshot(): BridgeSnapshot;
     rawNames(): readonly string[];
     rawNameMatching(pattern: RegExp): string | undefined;
