@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.15 - 2026-11-19
+
+- Serialize connection replacement and refresh the Jira site cache when the connection changes.
+- Apply connection settings only after saving them and use the same Jira resource parser during connection and board loading.
+
 ## 0.1.14 - 2026-11-19
 
 - Reuse the site resolved while connecting for the first Jira board render, removing a duplicate accessibleatlassianresources MCP round-trip; the board still falls back to its own lookup when the cached site is stale.

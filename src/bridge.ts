@@ -315,7 +315,7 @@ export class AtlassianBridge {
     for (let attempt = 0; attempt < 2; attempt++) {
       check()
       this.#setStatus('connecting')
-      const client = new Client({ name: 'dsh-atlassian', version: '0.1.14' })
+      const client = new Client({ name: 'dsh-atlassian', version: '0.1.15' })
       // Releasing the session lease here would race the SDK's saveTokens; an
       // exchange that is still in flight is released by its own finally block.
       client.onerror = () => { const operation = this.#operation.getStore(); if (operation?.exchangePending) operation.releaseRefresh?.() }
